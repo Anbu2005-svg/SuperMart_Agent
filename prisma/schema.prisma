@@ -11,26 +11,56 @@ generator client {
 }
 
 model Product {
-  sku_id        String      @id
-  name          String
-  category      String
-  unit          String
-  is_loose      Boolean     @default(false)
-  cost_price    Float
-  mrp           Float
-  gst_slab      Float       @default(0)
-  hsn_code      String?
-  quantity      Float       @default(0)
-  reorder_level Float       @default(10)
-  bill_items    BillItem[]
+  sku_id              String       @id
+  name                String
+  category            String
+  unit                String
+  base_unit           String       @default("piece")
+  conversion_factor   Float        @default(1.0)
+  price_per_base_unit Float?
+  is_loose            Boolean      @default(false)
+  cost_price          Float
+  mrp                 Float
+  gst_slab            Float        @default(0)
+  hsn_code            String?
+  quantity            Float        @default(0)
+  reorder_level       Float        @default(10)
+  is_active           Boolean?     @default(true)
+  created_at          DateTime?    @default(now())
+  updated_at          DateTime?    @default(now())
+  bill_items          BillItem[]
+  stock_batches       StockBatch[]
 
+  @@index([is_active], name: "idx_products_active")
   @@map("products")
+}
+
+model StockBatch {
+  batch_id      Int       @id @default(autoincrement())
+  sku_id        String
+  batch_code    String
+  qty_received  Float
+  qty_remaining Float
+  cost_price    Float
+  expiry_date   DateTime? @db.Date
+  received_at   DateTime? @default(now())
+  product       Product   @relation(fields: [sku_id], references: [sku_id], onDelete: Cascade)
+
+  @@unique([sku_id, batch_code])
+  @@index([sku_id], name: "idx_batches_sku")
+  @@index([expiry_date], name: "idx_batches_expiry")
+  @@map("stock_batches")
 }
 
 model Customer {
   customer_id        Int                 @id @default(autoincrement())
   name               String              @unique
   khata_balance      Float               @default(0)
+  credit_limit       Float?              @default(0)
+  phone              String?
+  address            String?
+  created_at         DateTime?           @default(now())
+  updated_at         DateTime?           @default(now())
   bills              Bill[]
   khata_transactions KhataTransaction[]
 
@@ -47,12 +77,16 @@ model Bill {
   cgst               Float               @default(0)
   sgst               Float               @default(0)
   total              Float               @default(0)
+  invoice_number     Int?
+  place_of_supply    String?
   created_at         DateTime            @default(now())
   finalized_at       DateTime?
   customer           Customer?           @relation(fields: [customer_id], references: [customer_id])
   bill_items         BillItem[]
   khata_transactions KhataTransaction[]
 
+  @@index([finalized_at], name: "idx_bills_finalized_at")
+  @@index([status], name: "idx_bills_status")
   @@map("bills")
 }
 
@@ -67,6 +101,8 @@ model BillItem {
   bill       Bill    @relation(fields: [bill_id], references: [bill_id])
   product    Product @relation(fields: [sku_id], references: [sku_id])
 
+  @@index([sku_id], name: "idx_bill_items_sku")
+  @@index([bill_id], name: "idx_bill_items_bill")
   @@map("bill_items")
 }
 
@@ -80,6 +116,7 @@ model KhataTransaction {
   customer    Customer @relation(fields: [customer_id], references: [customer_id])
   bill        Bill?    @relation(fields: [bill_id], references: [bill_id])
 
+  @@index([customer_id], name: "idx_khata_customer")
   @@map("khata_transactions")
 }
 
@@ -93,20 +130,31 @@ model Preference {
 }
 
 model IdempotencyLog {
-  update_id    String   @id
-  processed_at DateTime @default(now())
+  update_id    String    @id
+  reply_text   String?
+  file_paths   String?
+  processed_at DateTime? @default(now())
 
   @@map("idempotency_log")
 }
 
+model UserRateLimit {
+  telegram_id  String @id
+  tokens       Float
+  last_updated Float
+
+  @@map("user_rate_limits")
+}
+
 model Shop {
-  shop_id       Int           @id @default(autoincrement())
-  shop_name     String        @unique
-  password_hash String
-  shop_address  String?
-  shop_gstin    String?
-  created_at    DateTime      @default(now())
-  user_sessions UserSession[]
+  shop_id         Int           @id @default(autoincrement())
+  shop_name       String        @unique
+  password_hash   String
+  shop_address    String?
+  shop_gstin      String?
+  place_of_supply String?
+  created_at      DateTime      @default(now())
+  user_sessions   UserSession[]
 
   @@map("shops")
 }

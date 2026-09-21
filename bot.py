@@ -28,6 +28,64 @@ logger = logging.getLogger(__name__)
 # more than once in a single bot process (handles Telegram's retry/duplicate sends)
 _PROCESSING_UPDATES: set = set()
 
+# ── Persistent Token-Bucket Rate Limiter: 20 msgs / 60s ──
+_RATE_LIMIT_MAX = int(os.getenv("RATE_LIMIT_MAX", "20"))
+_RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "60"))
+_USER_RATE_BUCKETS: Dict[str, List[float]] = {}
+
+def is_rate_limited(telegram_id: str) -> bool:
+    """
+    Persistent token-bucket rate limit per Telegram user to prevent API-cost abuse.
+    Persists state in PostgreSQL across bot restarts and multiple worker instances,
+    with an automatic in-memory fallback if the database is busy or unreachable.
+    """
+    import time as _time
+    now = _time.time()
+    max_tokens = float(_RATE_LIMIT_MAX)
+    refill_rate = max_tokens / float(_RATE_LIMIT_WINDOW)
+
+    try:
+        from db.models import get_db_connection, immediate_transaction
+        conn = get_db_connection()
+        try:
+            with immediate_transaction(conn):
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT tokens, last_updated FROM user_rate_limits WHERE telegram_id = %s FOR UPDATE",
+                    (str(telegram_id),)
+                )
+                row = cur.fetchone()
+                if row:
+                    elapsed = max(0.0, now - float(row["last_updated"]))
+                    tokens = min(max_tokens, float(row["tokens"]) + elapsed * refill_rate)
+                else:
+                    tokens = max_tokens
+
+                if tokens < 1.0:
+                    cur.close()
+                    return True
+
+                tokens -= 1.0
+                cur.execute("""
+                    INSERT INTO user_rate_limits (telegram_id, tokens, last_updated)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (telegram_id)
+                    DO UPDATE SET tokens = EXCLUDED.tokens, last_updated = EXCLUDED.last_updated
+                """, (str(telegram_id), tokens, now))
+                cur.close()
+                return False
+        finally:
+            conn.close()
+    except Exception:
+        # Fallback to local in-memory token bucket if database is busy or unmigrated
+        bucket = _USER_RATE_BUCKETS.setdefault(telegram_id, [])
+        while bucket and bucket[0] <= now - _RATE_LIMIT_WINDOW:
+            bucket.pop(0)
+        if len(bucket) >= _RATE_LIMIT_MAX:
+            return True
+        bucket.append(now)
+        return False
+
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
@@ -195,6 +253,106 @@ async def analysis_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
     await update.message.reply_text(f"❌ Failed to generate analysis deck: {res.get('message', 'Unknown error')}")
 
+async def handle_voice_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handle voice notes: transcribe (if Whisper or OpenAI API is configured) and
+    route the transcript through the agent as a normal text message.
+    Supports VOICE_TRANSCRIBE_API_KEY or standard OPENAI_API_KEY.
+    """
+    if not update.message or not update.message.voice:
+        return
+
+    telegram_id = str(update.effective_user.id) if update.effective_user else "default"
+    session = get_user_session(telegram_id)
+    if not session:
+        await update.message.reply_text("🔐 Authentication required. Send /start to log into your shop.")
+        return
+
+    # Auto-detect Whisper provider: GROQ_API_KEY (100% Free), VOICE_TRANSCRIBE_API_KEY, or OPENAI_API_KEY
+    groq_key = os.getenv("GROQ_API_KEY", "").strip()
+    voice_key = os.getenv("VOICE_TRANSCRIBE_API_KEY", "").strip()
+    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+
+    if groq_key:
+        api_key = groq_key
+        base_url = os.getenv("VOICE_TRANSCRIBE_BASE_URL", "").strip() or "https://api.groq.com/openai/v1"
+        model = os.getenv("VOICE_TRANSCRIBE_MODEL", "whisper-large-v3-turbo")
+    elif voice_key:
+        api_key = voice_key
+        base_url = os.getenv("VOICE_TRANSCRIBE_BASE_URL", "").strip() or "https://api.openai.com/v1"
+        model = os.getenv("VOICE_TRANSCRIBE_MODEL", "whisper-1")
+    elif openai_key:
+        api_key = openai_key
+        base_url = os.getenv("VOICE_TRANSCRIBE_BASE_URL", "").strip() or "https://api.openai.com/v1"
+        model = os.getenv("VOICE_TRANSCRIBE_MODEL", "whisper-1")
+    else:
+        api_key = ""
+        base_url = ""
+        model = ""
+
+    if not (api_key and base_url):
+        await update.message.reply_text(
+            "🎙️ **Voice note received!**\n\n"
+            "To enable free voice notes:\n"
+            "1. Create a 100% free key at [console.groq.com](https://console.groq.com) (no credit card required).\n"
+            "2. Add `GROQ_API_KEY=gsk_...` into your `.env` file.\n\n"
+            "For now, please type your message as text! 🛒",
+            parse_mode="Markdown"
+        )
+        return
+
+    waiting = await update.message.reply_text("🎤 Transcribing your voice note...")
+
+    transcript = None
+    try:
+        import httpx
+
+        voice_file = await context.bot.get_file(update.message.voice.file_id)
+        ogg_bytes = await voice_file.download_as_bytearray()
+
+        async def _transcribe():
+            async with httpx.AsyncClient(timeout=45) as client:
+                files = {"file": ("voice.ogg", bytes(ogg_bytes), "audio/ogg")}
+                # Guide Whisper specifically for English, Tamil, and Hindi Kirana supermarket terminology
+                data = {
+                    "model": model,
+                    "prompt": (
+                        "Kirana supermarket store operations and billing in English, Tamil (தமிழ், Tanglish), "
+                        "and Hindi (हिंदी, Hinglish). Terms: Maggi, Atta, Sugar, Dal, Rice, Salt, Oil, Milk, "
+                        "kg, g, litre, ml, packet, piece, MRP, GST, bill, cash, UPI, card, khata, "
+                        "ரூபாய், கிலோ, பாக்கெட், பில், அரிசி, சர்க்கரை, பருப்பு, எண்ணெய், பால், "
+                        "रुपये, किलो, पैकेट, बिल, आटा, चीनी, दाल, तेल, दूध."
+                    )
+                }
+                resp = await client.post(
+                    f"{base_url.rstrip('/')}/audio/transcriptions",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    files=files,
+                    data=data,
+                )
+                resp.raise_for_status()
+                return resp.json().get("text")
+
+        transcript = await asyncio.wait_for(_transcribe(), timeout=45)
+    except asyncio.TimeoutError:
+        logger.warning("Voice transcription timed out after 45s.")
+        await waiting.edit_text("⏱️ Voice transcription timed out. Please send your request as text.")
+        return
+    except Exception as e:
+        logger.warning(f"Voice transcription failed: {e}")
+        await waiting.edit_text("⚠️ Couldn't transcribe the voice note. Please type your request as text.")
+        return
+
+    if not transcript or not transcript.strip():
+        await waiting.edit_text(
+            "⚠️ Voice note was empty or could not be transcribed. Please type your request as text."
+        )
+        return
+
+    await waiting.edit_text(f"🎧 Transcribed: \"{transcript.strip()}\" — processing...")
+    await handle_message(update, context, user_text_override=transcript.strip())
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text_override: Optional[str] = None):
     """Handle regular text messages and multi-step shop authentication state machine."""
     if not update.message:
@@ -259,6 +417,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, use
                     shop_address = parts[0]
                 if len(parts) >= 2:
                     shop_gstin = parts[1]
+                    # Validate GSTIN format (15 chars: 2-digit state + 10-char PAN + entity + checksum)
+                    from agent.harness import validate_gstin
+                    if not validate_gstin(shop_gstin):
+                        await update.message.reply_text(
+                            "⚠️ That GSTIN doesn't look valid. A GSTIN has 15 characters like `33AABCU9603R1ZM`.\n\n"
+                            "Please re-enter **Address, GSTIN** (or reply `skip` to finish without GSTIN).",
+                            parse_mode="Markdown"
+                        )
+                        return
 
             reg_res = register_shop(shop_name=shop_name, password=password, shop_address=shop_address, shop_gstin=shop_gstin)
             if reg_res.get("status") == "success":
@@ -312,6 +479,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, use
     chat_id = update.effective_chat.id
     owner_id = telegram_id
     update_id = str(update.update_id)
+
+    # ⚡ Per-user rate limiting — refuse bursts that would burn LLM tokens
+    if is_rate_limited(telegram_id):
+        await update.message.reply_text(
+            f"⏳ You're sending messages too quickly. Please wait a moment (limit: {_RATE_LIMIT_MAX} messages / {_RATE_LIMIT_WINDOW}s)."
+        )
+        return
 
     # ⚡ In-memory dedup: silently drop if this update_id is already being processed
     # (handles Telegram retries / duplicate deliveries within the same process)
@@ -605,6 +779,90 @@ def start_daily_morning_logout_scheduler():
     print(f"🌅 Daily morning logout scheduler active (every morning at {reset_hour:02d}:{reset_minute:02d} AM IST).")
 
 
+def start_weekly_deck_scheduler():
+    """
+    Scheduled weekly analysis deck auto-send (stretch goal).
+    Every Sunday ~8:00 PM IST, generates the weekly analysis PPTX and pushes it
+    to every shop owner with an active session (or all authenticated users).
+    Enable with WEEKLY_DECK_ENABLED=true. Delegates generation to the agent's
+    own document tools (never screenshots).
+    """
+    import threading
+    import time as _time
+    from datetime import datetime, timezone, timedelta
+    from skills.documents import generate_analysis_deck
+
+    if os.getenv("WEEKLY_DECK_ENABLED", "false").lower().strip() not in ("true", "1", "yes"):
+        return
+
+    IST = timezone(timedelta(hours=5, minutes=30), name="IST")
+    # Day 6 = Sunday (Python weekday(): Monday=0)
+    target_dow = int(os.getenv("WEEKLY_DECK_DOW", "6"))
+    target_hour = int(os.getenv("WEEKLY_DECK_HOUR_IST", "20"))
+
+    def scheduler_loop():
+        last_sent_week = None
+        while True:
+            try:
+                now_ist = datetime.now(IST)
+                iso_year, iso_week, _ = now_ist.isocalendar()
+                week_key = f"{iso_year}-W{iso_week}"
+                if (now_ist.weekday() == target_dow and now_ist.hour == target_hour
+                        and last_sent_week != week_key):
+                    logger.info("📊 Generating scheduled weekly analysis decks...")
+                    last_sent_week = week_key
+
+                    result = generate_analysis_deck("This Week", days=7)
+                    if result.get("status") != "success":
+                        continue
+                    file_path = result["file_path"]
+                    if not is_safe_generated_file(file_path):
+                        continue
+
+                    # Push to all authenticated Telegram users
+                    try:
+                        from db.models import get_db_connection
+                        conn = get_db_connection()
+                        try:
+                            cur = conn.cursor()
+                            cur.execute("SELECT telegram_id FROM user_sessions")
+                            users = cur.fetchall()
+                            cur.close()
+                        finally:
+                            conn.close()
+
+                        from telegram import Bot
+                        token = os.getenv("TELEGRAM_BOT_TOKEN")
+                        if token:
+                            bot = Bot(token)
+                            import asyncio as _a
+                            loop = _a.new_event_loop()
+
+                            def send_all():
+                                for u in users:
+                                    try:
+                                        with open(file_path, "rb") as doc:
+                                            loop.run_until_complete(bot.send_document(
+                                                chat_id=u["telegram_id"],
+                                                document=doc,
+                                                filename=os.path.basename(file_path),
+                                                caption="📊 Your scheduled weekly sales & operations analysis deck is ready!"
+                                            ))
+                                    except Exception as e_user:
+                                        logger.warning(f"Weekly deck send failed for {u['telegram_id']}: {e_user}")
+                            send_all()
+                            loop.close()
+                    except Exception as e:
+                        logger.warning(f"Weekly deck distribution failed: {e}")
+            except Exception as e:
+                logger.error(f"Error in weekly deck scheduler: {e}")
+            _time.sleep(300)  # check every 5 minutes
+
+    thread = threading.Thread(target=scheduler_loop, daemon=True)
+    thread.start()
+    print(f"📊 Weekly analysis deck scheduler active (every Sunday {target_hour:02d}:00 IST).")
+
+
 def main():
     """Main application entry point."""
     token = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -620,6 +878,9 @@ def main():
 
     # Start daily morning logout scheduler (between 4:00 AM and 5:00 AM IST)
     start_daily_morning_logout_scheduler()
+
+    # Start scheduled weekly analysis deck auto-sender (optional, WEEKLY_DECK_ENABLED=true)
+    start_weekly_deck_scheduler()
 
     app = ApplicationBuilder().token(token).post_init(post_init).build()
 
@@ -638,6 +899,7 @@ def main():
     app.add_handler(CommandHandler("analysis", analysis_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CallbackQueryHandler(button_callback_handler))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice_note))
     app.add_handler(MessageHandler(filters.CONTACT | (filters.TEXT & ~filters.COMMAND), handle_message))
 
     print(f"🤖 Supermarket Ops Agent Telegram Bot is running...")

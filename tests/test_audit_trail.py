@@ -149,13 +149,16 @@ def test_audit_logs_stock_receipt_and_product():
     assert matching_add["old_value"] == 0 and matching_add["new_value"] == 50.0
 
 def test_audit_logs_khata_events():
-    from skills.credit import get_khata_balance
+    from skills.credit import get_khata_balance, set_credit_limit
+    set_credit_limit("Priya Sharma", 0.0)
     initial_bal = get_khata_balance("Priya Sharma").get("khata_balance", 0.0)
     
     # Direct charge
-    charge_khata("Priya Sharma", 350.0)
+    res_chg = charge_khata("Priya Sharma", 350.0)
+    assert res_chg["status"] == "success"
     # Payment
-    record_payment("Priya Sharma", 200.0)
+    res_pmt = record_payment("Priya Sharma", 200.0)
+    assert res_pmt["status"] == "success"
     # Finalize-path khata charge
     bill_id = start_bill(customer_name="Priya Sharma")["bill_id"]
     add_item_to_bill(bill_id, "Maggi", 2)

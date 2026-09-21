@@ -9,3 +9,6 @@ __pycache__/
 *.png
 .pytest_cache/
 generated_docs/
+.kilo/
+node_modules/
+*.log

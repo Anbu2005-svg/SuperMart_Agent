@@ -1,3 +1,6 @@
+# Pure logic tests — no database required.
+NO_DB = True
+
 from agent.harness import _load_api_keys, normalize_openai_base_url
 
 

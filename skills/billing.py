@@ -4,6 +4,14 @@ from typing import Dict, Any, List, Optional
 from db.models import get_db_connection, immediate_transaction
 from skills.audit import _log_event
 
+# Unit conversion helpers for loose-item billing (kg <-> g, litre <-> ml)
+_UNIT_CONVERSIONS = {
+    ("kg", "g"): 1000.0,
+    ("g", "kg"): 0.001,
+    ("litre", "ml"): 1000.0,
+    ("ml", "litre"): 0.001,
+}
+
 
 def _calculate_gst(line_subtotal: float, gst_slab: float) -> Dict[str, float]:
     """
@@ -67,21 +75,21 @@ def _resolve_sku(conn, sku_or_name: str) -> Dict[str, Any]:
     """Helper to resolve SKU ID or product name to a product record or multiple matches."""
     cur = conn.cursor()
     # 1. Search by exact SKU ID
-    cur.execute("SELECT * FROM products WHERE sku_id = %s", (sku_or_name.strip(),))
+    cur.execute("SELECT * FROM products WHERE sku_id = %s AND is_active = TRUE", (sku_or_name.strip(),))
     product = cur.fetchone()
     if product:
         cur.close()
         return {"status": "single", "product": product}
 
     # 2. Search by exact name (case-insensitive)
-    cur.execute("SELECT * FROM products WHERE name ILIKE %s", (sku_or_name.strip(),))
+    cur.execute("SELECT * FROM products WHERE name ILIKE %s AND is_active = TRUE", (sku_or_name.strip(),))
     product = cur.fetchone()
     if product:
         cur.close()
         return {"status": "single", "product": product}
 
     # 3. Search by substring/prefix
-    cur.execute("SELECT * FROM products WHERE name ILIKE %s ORDER BY name ASC", (f"%{sku_or_name.strip()}%",))
+    cur.execute("SELECT * FROM products WHERE name ILIKE %s AND is_active = TRUE ORDER BY name ASC", (f"%{sku_or_name.strip()}%",))
     matches = cur.fetchall()
     cur.close()
 
@@ -93,6 +101,37 @@ def _resolve_sku(conn, sku_or_name: str) -> Dict[str, Any]:
     return {"status": "multiple", "matches": matches, "product": None}
 
 
+def _price_line(product: Dict[str, Any], qty: float) -> Dict[str, Any]:
+    """
+    Compute unit_price (price for ONE unit of the product's `unit`) and the line subtotal.
+
+    Loose items with price_per_base_unit set:
+      unit_price = price_per_base_unit converted into product.unit terms.
+      e.g. sugar priced ₹48/kg sold in 'kg' units -> unit_price = 48.0.
+           If a product's unit is 'g' but base pricing is per 'kg', unit_price = 48/1000.
+
+    Packaged items: unit_price = MRP (price of one packet/piece/dozen).
+    """
+    is_loose = bool(product.get("is_loose", False))
+    price_per_base = product.get("price_per_base_unit")
+    unit = (product.get("unit") or "piece").lower()
+    base_unit = (product.get("base_unit") or unit).lower()
+
+    if is_loose and price_per_base is not None:
+        unit_price = float(price_per_base)
+        if unit != base_unit:
+            # _UNIT_CONVERSIONS[(a, b)] = how many b-units are in ONE a-unit
+            # e.g. ("kg", "g") = 1000  → one kg is 1000 g
+            factor = _UNIT_CONVERSIONS.get((base_unit, unit))
+            if factor is not None:
+                # price per ONE base-unit → price per ONE selling-unit:
+                # one selling unit = 1/factor base units, so divide.
+                unit_price = round(float(price_per_base) / factor, 4)
+        return {"unit_price": round(unit_price, 2), "price_basis": f"₹{price_per_base}/{base_unit}"}
+
+    return {"unit_price": float(product["mrp"]), "price_basis": "MRP per unit"}
+
+
 def add_item_to_bill(bill_id: str, sku_or_name: str, qty: float) -> Dict[str, Any]:
     """Add an item to a draft bill. Performs stock warning check and cost price guard check."""
     if not isinstance(qty, (int, float)) or not math.isfinite(qty) or qty <= 0:
@@ -100,69 +139,77 @@ def add_item_to_bill(bill_id: str, sku_or_name: str, qty: float) -> Dict[str, An
 
     conn = get_db_connection()
     try:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM bills WHERE bill_id = %s", (bill_id.strip(),))
-        bill = cur.fetchone()
-        if not bill:
-            return {"status": "error", "message": f"Bill '{bill_id}' not found."}
-        if bill["status"] != "draft":
-            return {"status": "error", "message": f"Bill '{bill_id}' is already {bill['status']} and cannot be edited."}
-
-        res_sku = _resolve_sku(conn, sku_or_name)
-        if res_sku["status"] == "not_found":
-            return {"status": "error", "message": f"Product matching '{sku_or_name}' not found."}
-        if res_sku["status"] == "multiple":
-            matches = res_sku["matches"]
-            match_list = [f"• {p['name']} [{p['sku_id']}] – MRP: ₹{p['mrp']} | Stock: {p['quantity']} {p['unit']}" for p in matches]
-            return {
-                "status": "multiple_matches",
-                "message": f"Found multiple products matching '{sku_or_name}'. Please specify which brand/variety you want:\n" + "\n".join(match_list),
-                "matches": [{"sku_id": p["sku_id"], "name": p["name"], "mrp": p["mrp"], "quantity": p["quantity"], "unit": p["unit"]} for p in matches]
-            }
-
-        product = res_sku["product"]
-
-        # Oversell soft check during draft addition
-        if qty > product["quantity"]:
-            return {
-                "status": "oversell_warning",
-                "message": f"Cannot add {qty} {product['unit']} of {product['name']}. Only {product['quantity']} available in stock.",
-                "available_stock": product["quantity"],
-                "requested_qty": qty
-            }
-
-        # Below-cost guard check
-        unit_price = product["mrp"]
-        if unit_price < product["cost_price"]:
-            return {
-                "status": "error",
-                "message": f"Selling price ({unit_price}) is below cost price ({product['cost_price']}) for product '{product['name']}'."
-            }
-
-        line_subtotal = qty * unit_price
-        gst_info = _calculate_gst(line_subtotal, product["gst_slab"])
-
         with immediate_transaction(conn):
             cur = conn.cursor()
+            cur.execute("SELECT * FROM bills WHERE bill_id = %s", (bill_id.strip(),))
+            bill = cur.fetchone()
+            if not bill:
+                return {"status": "error", "message": f"Bill '{bill_id}' not found."}
+            if bill["status"] != "draft":
+                return {"status": "error", "message": f"Bill '{bill_id}' is already {bill['status']} and cannot be edited."}
+
+            res_sku = _resolve_sku(conn, sku_or_name)
+            if res_sku["status"] == "not_found":
+                return {"status": "error", "message": f"Product matching '{sku_or_name}' not found."}
+            if res_sku["status"] == "multiple":
+                matches = res_sku["matches"]
+                match_list = [f"• {p['name']} [{p['sku_id']}] – MRP: ₹{p['mrp']} | Stock: {p['quantity']} {p['unit']}" for p in matches]
+                return {
+                    "status": "multiple_matches",
+                    "message": f"Found multiple products matching '{sku_or_name}'. Please specify which brand/variety you want:\n" + "\n".join(match_list),
+                    "matches": [{"sku_id": p["sku_id"], "name": p["name"], "mrp": p["mrp"], "quantity": p["quantity"], "unit": p["unit"]} for p in matches]
+                }
+
+            product = res_sku["product"]
+
+            # Lock the product row so concurrent drafts / stock receipts see a consistent quantity
+            cur.execute("SELECT quantity FROM products WHERE sku_id = %s FOR UPDATE", (product["sku_id"],))
+            locked = cur.fetchone()
+            if not locked:
+                return {"status": "error", "message": f"Product '{product['name']}' not found after lock."}
+            available_qty = locked["quantity"]
+
+            # Oversell soft check during draft addition
+            if qty > available_qty:
+                return {
+                    "status": "oversell_warning",
+                    "message": f"Cannot add {qty} {product['unit']} of {product['name']}. Only {available_qty} available in stock.",
+                    "available_stock": available_qty,
+                    "requested_qty": qty
+                }
+
+            pricing = _price_line(product, qty)
+            unit_price = pricing["unit_price"]
+
+            # Below-cost guard check
+            if unit_price < product["cost_price"]:
+                return {
+                    "status": "error",
+                    "message": f"Selling price ({unit_price}) is below cost price ({product['cost_price']}) for product '{product['name']}'."
+                }
+
+            line_subtotal = round(qty * unit_price, 2)
+            gst_info = _calculate_gst(line_subtotal, product["gst_slab"])
+
             # Check if item already exists in bill
             cur.execute("SELECT * FROM bill_items WHERE bill_id = %s AND sku_id = %s", (bill_id.strip(), product["sku_id"]))
             existing = cur.fetchone()
 
             if existing:
                 new_qty = existing["qty"] + qty
-                if new_qty > product["quantity"]:
+                if new_qty > available_qty:
                     return {
                         "status": "oversell_warning",
-                        "message": f"Updating total item qty to {new_qty} exceeds available stock ({product['quantity']}).",
-                        "available_stock": product["quantity"]
+                        "message": f"Updating total item qty to {new_qty} exceeds available stock ({available_qty}).",
+                        "available_stock": available_qty
                     }
-                new_subtotal = new_qty * unit_price
+                new_subtotal = round(new_qty * unit_price, 2)
                 new_gst = _calculate_gst(new_subtotal, product["gst_slab"])
                 cur.execute("""
                     UPDATE bill_items
-                    SET qty = %s, line_total = %s
+                    SET qty = %s, unit_price = %s, line_total = %s
                     WHERE id = %s
-                """, (new_qty, new_gst["line_total"], existing["id"]))
+                """, (new_qty, unit_price, new_gst["line_total"], existing["id"]))
             else:
                 cur.execute("""
                     INSERT INTO bill_items (bill_id, sku_id, qty, unit_price, gst_slab, line_total)
@@ -172,7 +219,8 @@ def add_item_to_bill(bill_id: str, sku_or_name: str, qty: float) -> Dict[str, An
             effective_qty = (existing["qty"] + qty) if existing else qty
             _log_event(conn, "ITEM_ADDED", "bill", bill_id,
                        details={"product_name": product["name"], "sku_id": product["sku_id"],
-                                "qty": effective_qty, "unit_price": unit_price})
+                                "qty": effective_qty, "unit_price": unit_price,
+                                "price_basis": pricing["price_basis"]})
             cur.close()
 
         return {
@@ -182,6 +230,7 @@ def add_item_to_bill(bill_id: str, sku_or_name: str, qty: float) -> Dict[str, An
             "product_name": product["name"],
             "qty": qty,
             "unit_price": unit_price,
+            "price_basis": pricing["price_basis"],
             "line_total": gst_info["line_total"]
         }
     finally:
@@ -224,30 +273,38 @@ def edit_item_qty(bill_id: str, sku_or_name: str, new_qty: float) -> Dict[str, A
 
     conn = get_db_connection()
     try:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM bills WHERE bill_id = %s", (bill_id.strip(),))
-        bill = cur.fetchone()
-        if not bill or bill["status"] != "draft":
-            return {"status": "error", "message": f"Bill '{bill_id}' not found or not in draft state."}
-
-        res_sku = _resolve_sku(conn, sku_or_name)
-        product = res_sku.get("product") if res_sku.get("status") == "single" else (res_sku.get("matches")[0] if res_sku.get("matches") else None)
-        if not product:
-            return {"status": "error", "message": f"Product matching '{sku_or_name}' not found."}
-
-        if new_qty > product["quantity"]:
-            return {
-                "status": "oversell_warning",
-                "message": f"Requested quantity {new_qty} exceeds available stock ({product['quantity']}).",
-                "available_stock": product["quantity"]
-            }
-
-        unit_price = product["mrp"]
-        new_subtotal = new_qty * unit_price
-        gst_info = _calculate_gst(new_subtotal, product["gst_slab"])
-
         with immediate_transaction(conn):
             cur = conn.cursor()
+            cur.execute("SELECT * FROM bills WHERE bill_id = %s", (bill_id.strip(),))
+            bill = cur.fetchone()
+            if not bill or bill["status"] != "draft":
+                return {"status": "error", "message": f"Bill '{bill_id}' not found or not in draft state."}
+
+            res_sku = _resolve_sku(conn, sku_or_name)
+            product = res_sku.get("product") if res_sku.get("status") == "single" else (res_sku.get("matches")[0] if res_sku.get("matches") else None)
+            if not product:
+                return {"status": "error", "message": f"Product matching '{sku_or_name}' not found."}
+
+            # Lock the product row for this transaction
+            cur.execute("SELECT quantity FROM products WHERE sku_id = %s FOR UPDATE", (product["sku_id"],))
+            locked = cur.fetchone()
+            if not locked:
+                return {"status": "error", "message": f"Product '{product['name']}' not found after lock."}
+            available_qty = locked["quantity"]
+
+            if new_qty > available_qty:
+                return {
+                    "status": "oversell_warning",
+                    "message": f"Requested quantity {new_qty} exceeds available stock ({available_qty}).",
+                    "available_stock": available_qty
+                }
+
+            pricing = _price_line(product, new_qty)
+            unit_price = pricing["unit_price"]
+
+            new_subtotal = round(new_qty * unit_price, 2)
+            gst_info = _calculate_gst(new_subtotal, product["gst_slab"])
+
             cur.execute("SELECT qty FROM bill_items WHERE bill_id = %s AND sku_id = %s",
                         (bill_id.strip(), product["sku_id"]))
             existing = cur.fetchone()
@@ -256,12 +313,13 @@ def edit_item_qty(bill_id: str, sku_or_name: str, new_qty: float) -> Dict[str, A
 
             cur.execute("""
                 UPDATE bill_items
-                SET qty = %s, line_total = %s
+                SET qty = %s, unit_price = %s, line_total = %s
                 WHERE bill_id = %s AND sku_id = %s
-            """, (new_qty, gst_info["line_total"], bill_id.strip(), product["sku_id"]))
+            """, (new_qty, unit_price, gst_info["line_total"], bill_id.strip(), product["sku_id"]))
 
             _log_event(conn, "ITEM_QTY_UPDATED", "bill", bill_id,
-                       details={"product_name": product["name"], "sku_id": product["sku_id"]},
+                       details={"product_name": product["name"], "sku_id": product["sku_id"],
+                                "unit_price": unit_price},
                        old_value=existing["qty"], new_value=new_qty)
             cur.close()
 
@@ -269,6 +327,8 @@ def edit_item_qty(bill_id: str, sku_or_name: str, new_qty: float) -> Dict[str, A
             "status": "success",
             "message": f"Updated quantity of '{product['name']}' to {new_qty} in bill {bill_id}.",
             "new_qty": new_qty,
+            "unit_price": unit_price,
+            "price_basis": pricing["price_basis"],
             "line_total": gst_info["line_total"]
         }
     finally:
@@ -305,7 +365,7 @@ def preview_bill(bill_id: str) -> Dict[str, Any]:
 
         item_previews = []
         for item in items:
-            line_subtotal = item["qty"] * item["unit_price"]
+            line_subtotal = round(item["qty"] * item["unit_price"], 2)
             gst_info = _calculate_gst(line_subtotal, item["gst_slab"])
 
             subtotal += gst_info["subtotal"]
@@ -332,6 +392,7 @@ def preview_bill(bill_id: str) -> Dict[str, Any]:
             "status": "success",
             "bill_id": bill_id,
             "bill_status": bill["status"],
+            "invoice_number": bill.get("invoice_number"),
             "payment_mode": (bill["payment_mode"] or "Pending").upper() if bill.get("payment_mode") else "Pending",
             "payment_ref": bill.get("payment_ref"),
             "customer_name": bill["customer_name"] or "Walk-in Customer",
@@ -353,16 +414,16 @@ def preview_bill(bill_id: str) -> Dict[str, Any]:
 def finalize_bill(
     bill_id: str,
     payment_mode: str,
-    payment_ref: Optional[str] = None,
-    idempotency_key: Optional[str] = None
+    payment_ref: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Finalize a draft bill:
-    1. Checks idempotency_log (if key provided).
-    2. Enforces oversell guard inside an atomic write transaction.
-    3. Decrements stock for all line items.
-    4. Computes final tax and updates bill status to 'finalized'.
-    5. Handles Khata ledger charge if payment_mode is 'khata'.
+    Finalize a draft bill atomically:
+    1. Enforces oversell guard with SELECT FOR UPDATE row locks inside one transaction.
+    2. Decrements stock (and FEFO-consumes stock_batches when batch data exists).
+    3. Assigns a sequential invoice number + snapshots place of supply.
+    4. Handles Khata ledger charge (with credit-limit enforcement) if payment_mode is 'khata'.
+    Telegram-level idempotency is enforced in the control loop before any tool runs.
+    Re-finalizing the same bill is a no-op that simply returns the stored preview.
     """
     payment_mode = payment_mode.lower().strip()
     if payment_mode not in ["cash", "upi", "card", "khata"]:
@@ -370,14 +431,6 @@ def finalize_bill(
 
     conn = get_db_connection()
     try:
-        cur = conn.cursor()
-        # 1. Idempotency Check
-        if idempotency_key:
-            cur.execute("SELECT * FROM idempotency_log WHERE update_id = %s", (str(idempotency_key),))
-            if cur.fetchone():
-                cur.close()
-                return preview_bill(bill_id)
-
         with immediate_transaction(conn):
             cur = conn.cursor()
             cur.execute("SELECT * FROM bills WHERE bill_id = %s", (bill_id.strip(),))
@@ -395,14 +448,14 @@ def finalize_bill(
             if not items:
                 return {"status": "error", "message": "Cannot finalize an empty bill. Add items first."}
 
-            # 2. Oversell Guard
+            # ── 1. Oversell guard with row locks ──
             subtotal = 0.0
             cgst_total = 0.0
             sgst_total = 0.0
             item_stock_before: Dict[str, Any] = {}
 
             for item in items:
-                cur.execute("SELECT * FROM products WHERE sku_id = %s", (item["sku_id"],))
+                cur.execute("SELECT * FROM products WHERE sku_id = %s FOR UPDATE", (item["sku_id"],))
                 product = cur.fetchone()
                 if not product:
                     raise ValueError(f"Product SKU {item['sku_id']} missing during finalization.")
@@ -416,7 +469,7 @@ def finalize_bill(
 
                 item_stock_before[item["sku_id"]] = {"qty": product["quantity"], "name": product["name"]}
 
-                line_subtotal = item["qty"] * item["unit_price"]
+                line_subtotal = round(item["qty"] * item["unit_price"], 2)
                 gst_info = _calculate_gst(line_subtotal, item["gst_slab"])
                 subtotal += gst_info["subtotal"]
                 cgst_total += gst_info["cgst"]
@@ -424,7 +477,7 @@ def finalize_bill(
 
             grand_total = round(subtotal + cgst_total + sgst_total, 2)
 
-            # 3. Khata validation
+            # ── 2. Khata validation (customer + credit limit) ──
             cust = None
             if payment_mode == "khata":
                 if not bill["customer_id"]:
@@ -433,18 +486,47 @@ def finalize_bill(
                         "error_type": "KhataCustomerRequired",
                         "message": "Cannot finalize bill with payment mode 'khata' without an associated customer."
                     }
-                cur.execute("SELECT * FROM customers WHERE customer_id = %s", (bill["customer_id"],))
+                cur.execute("SELECT * FROM customers WHERE customer_id = %s FOR UPDATE", (bill["customer_id"],))
                 cust = cur.fetchone()
                 if not cust:
                     return {"status": "error", "message": "Khata customer not found in customer ledger."}
 
-            # 4. Decrement Stock
+                credit_limit = cust.get("credit_limit") or 0
+                if credit_limit > 0 and (cust["khata_balance"] + grand_total) > credit_limit:
+                    return {
+                        "status": "error",
+                        "error_type": "CreditLimitExceeded",
+                        "message": (f"Credit limit exceeded for {cust['name']}. Limit: ₹{credit_limit:.2f}, "
+                                    f"Current: ₹{cust['khata_balance']:.2f}, This bill: ₹{grand_total:.2f}, "
+                                    f"Would become: ₹{cust['khata_balance'] + grand_total:.2f}")
+                    }
+
+            # ── 3. Decrement stock + FEFO batch consumption ──
             for item in items:
                 cur.execute("""
                     UPDATE products
-                    SET quantity = quantity - %s
+                    SET quantity = quantity - %s, updated_at = CURRENT_TIMESTAMP
                     WHERE sku_id = %s
                 """, (item["qty"], item["sku_id"]))
+
+                # FEFO: consume batch rows nearest-expiry-first if batch data exists for this SKU
+                remaining = item["qty"]
+                cur.execute("""
+                    SELECT batch_id FROM stock_batches
+                    WHERE sku_id = %s AND qty_remaining > 0
+                    ORDER BY expiry_date NULLS LAST, received_at ASC
+                    FOR UPDATE
+                """, (item["sku_id"],))
+                batch_rows = cur.fetchall()
+                for row in batch_rows:
+                    if remaining <= 0:
+                        break
+                    cur.execute("SELECT qty_remaining FROM stock_batches WHERE batch_id = %s FOR UPDATE", (row["batch_id"],))
+                    b = cur.fetchone()
+                    take = min(b["qty_remaining"], remaining)
+                    cur.execute("UPDATE stock_batches SET qty_remaining = qty_remaining - %s WHERE batch_id = %s",
+                                (take, row["batch_id"]))
+                    remaining -= take
 
                 before = item_stock_before[item["sku_id"]]
                 _log_event(conn, "STOCK_DECREMENTED", "product", item["sku_id"],
@@ -452,7 +534,7 @@ def finalize_bill(
                                     "qty_sold": item["qty"]},
                            old_value=before["qty"], new_value=before["qty"] - item["qty"])
 
-            # 5. Record Khata Transaction if applicable
+            # ── 4. Khata ledger charge ──
             if payment_mode == "khata" and cust:
                 cur.execute("""
                     INSERT INTO khata_transactions (customer_id, type, amount, bill_id)
@@ -461,7 +543,7 @@ def finalize_bill(
 
                 cur.execute("""
                     UPDATE customers
-                    SET khata_balance = khata_balance + %s
+                    SET khata_balance = khata_balance + %s, updated_at = CURRENT_TIMESTAMP
                     WHERE customer_id = %s
                 """, (grand_total, bill["customer_id"]))
 
@@ -470,7 +552,25 @@ def finalize_bill(
                            old_value=cust["khata_balance"],
                            new_value=cust["khata_balance"] + grand_total)
 
-            # 6. Update Bill Status to Finalized
+            # ── 5. Sequential invoice number (guaranteed race-free via PostgreSQL sequence) ──
+            try:
+                cur.execute("SELECT nextval('invoice_number_seq') AS next_num")
+                next_invoice_number = cur.fetchone()["next_num"]
+            except Exception:
+                # Fallback if sequence is not yet initialized on existing database
+                cur.execute("SELECT COALESCE(MAX(invoice_number), 0) + 1 AS next_num FROM bills")
+                next_invoice_number = cur.fetchone()["next_num"]
+
+            shop_pos = None
+            try:
+                cur.execute("SELECT place_of_supply FROM shops ORDER BY shop_id LIMIT 1")
+                pos_row = cur.fetchone()
+                if pos_row:
+                    shop_pos = pos_row.get("place_of_supply")
+            except Exception:
+                pass
+
+            # ── 6. Update Bill Status to Finalized ──
             cur.execute("""
                 UPDATE bills
                 SET status = 'finalized',
@@ -480,18 +580,12 @@ def finalize_bill(
                     cgst = %s,
                     sgst = %s,
                     total = %s,
+                    invoice_number = %s,
+                    place_of_supply = %s,
                     finalized_at = CURRENT_TIMESTAMP
                 WHERE bill_id = %s
             """, (payment_mode, payment_ref, round(subtotal, 2), round(cgst_total, 2),
-                  round(sgst_total, 2), grand_total, bill_id.strip()))
-
-            # 7. Log Idempotency
-            if idempotency_key:
-                cur.execute("""
-                    INSERT INTO idempotency_log (update_id)
-                    VALUES (%s)
-                    ON CONFLICT (update_id) DO NOTHING
-                """, (str(idempotency_key),))
+                  round(sgst_total, 2), grand_total, next_invoice_number, shop_pos, bill_id.strip()))
 
             customer_name = None
             if bill["customer_id"]:
@@ -501,36 +595,14 @@ def finalize_bill(
 
             _log_event(conn, "BILL_FINALIZED", "bill", bill_id,
                        details={"payment_mode": payment_mode, "grand_total": grand_total,
-                                "customer_name": customer_name})
-        # Check for low stock alerts after billing
-        low_stock_alerts = []
-        conn2 = get_db_connection()
-        try:
-            cur2 = conn2.cursor()
-            cur2.execute("""
-                SELECT sku_id, name, quantity, reorder_level, unit
-                FROM products
-                WHERE quantity <= reorder_level
-                ORDER BY name ASC
-            """)
-            low_items = cur2.fetchall()
-            cur2.close()
-            if low_items:
-                low_stock_alerts = [{
-                    "sku_id": p["sku_id"],
-                    "name": p["name"],
-                    "current_qty": p["quantity"],
-                    "reorder_level": p["reorder_level"],
-                    "unit": p["unit"]
-                } for p in low_items]
-        except Exception:
-            pass
-        finally:
-            conn2.close()
+                                "customer_name": customer_name, "invoice_number": next_invoice_number})
+            cur.close()
 
-        # Return finalized bill summary
+        # Post-commit: low stock alerts (separate read-only query, safe outside txn)
+        low_stock_alerts = _fetch_low_stock_alerts()
+
         final_preview = preview_bill(bill_id)
-        final_preview["message"] = f"Bill {bill_id} finalized successfully! Total: \u20b9{grand_total} ({payment_mode.upper()})."
+        final_preview["message"] = f"Bill {bill_id} finalized successfully! Invoice #{next_invoice_number}. Total: ₹{grand_total} ({payment_mode.upper()})."
         if low_stock_alerts:
             alert_items_str = ", ".join([f"{item['name']} ({item['current_qty']} {item['unit']} left)" for item in low_stock_alerts])
             final_preview["low_stock_warning"] = (
@@ -543,11 +615,37 @@ def finalize_bill(
         conn.close()
 
 
+def _fetch_low_stock_alerts() -> List[Dict[str, Any]]:
+    """Read-only low stock scan used after billing. Never raises."""
+    try:
+        conn = get_db_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT sku_id, name, quantity, reorder_level, unit
+                FROM products
+                WHERE is_active = TRUE AND quantity <= reorder_level
+                ORDER BY name ASC
+            """)
+            low_items = cur.fetchall()
+            cur.close()
+            return [{
+                "sku_id": p["sku_id"],
+                "name": p["name"],
+                "current_qty": p["quantity"],
+                "reorder_level": p["reorder_level"],
+                "unit": p["unit"]
+            } for p in low_items]
+        finally:
+            conn.close()
+    except Exception:
+        return []
+
+
 def quick_create_bill(
     items: List[Dict[str, Any]],
     customer_name: Optional[str] = None,
-    payment_mode: Optional[str] = None,
-    idempotency_key: Optional[str] = None
+    payment_mode: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     ULTRAFAST Single-Turn Billing Tool:
@@ -588,7 +686,7 @@ def quick_create_bill(
 
     # 3. Finalize if payment mode provided
     if payment_mode:
-        fin_res = finalize_bill(bill_id=bill_id, payment_mode=payment_mode, idempotency_key=idempotency_key)
+        fin_res = finalize_bill(bill_id=bill_id, payment_mode=payment_mode)
         if warnings:
             fin_res["warnings"] = warnings
         return fin_res
