@@ -1,7 +1,7 @@
 # SuperMart AI Ops Agent 🛒🤖
 
 > **Supermarket Operations AI Agent for Telegram**  
-> An intelligent, autonomous Telegram AI Operations Agent for Indian Kirana Supermarkets built with **100% Free & Open-Source Tools**, PostgreSQL cloud database, dual LLM key failover, and ReportLab / Matplotlib document generators.
+> An intelligent, autonomous Telegram AI Operations Agent for Indian Kirana Supermarkets built with **100% Free & Open-Source Tools**, Prisma Cloud PostgreSQL database, Groq Whisper multilingual voice recognition, dual LLM key failover, FEFO batch inventory, and ReportLab / Matplotlib document generators.
 
 ---
 
@@ -11,21 +11,46 @@
 * **Live Deployment:** **Deployed Live on Render** 🚀 ([Render Web Service](https://render.com))
 * **Project Demo Video:** [Watch Full Demo Video on Google Drive 🎥](https://drive.google.com/file/d/1pdQ5xrjZ3hvjJYbu41JMtpRS_JPcJHjR/view?usp=sharing)
 * **Author / Contributor:** `Anbu2005-svg`
-* **Core Tech Stack:** Python 3.9+, Telegram Bot API (`python-telegram-bot`), Ollama Cloud OpenAI-compatible API (`nemotron-3-super`), PostgreSQL (psycopg2 / Prisma), ReportLab (PDF Invoices), python-pptx & Matplotlib (PPTX Decks), pytest.
+* **Core Tech Stack:** Python 3.9+, Telegram Bot API (`python-telegram-bot`), Groq Whisper API (`whisper-large-v3`), Ollama Cloud API (`nemotron-3-super`), Prisma Cloud PostgreSQL (`psycopg2-binary`), ReportLab (PDF Invoices), python-pptx & Matplotlib (PPTX Decks), pytest.
 
 ---
 
-## 🎥 Video Demonstration & Operational Walkthrough
+## 🌟 Key New Features & Capabilities
 
-> 🎬 **Watch the Complete Project Demonstration:**  
-> Click here to watch the full operational walkthrough video on Google Drive:  
-> 👉 [**SuperMart AI Ops Agent - Video Demo**](https://drive.google.com/file/d/1pdQ5xrjZ3hvjJYbu41JMtpRS_JPcJHjR/view?usp=sharing)
+### 1. 🎙️ Multilingual Voice Note Support (English, Tamil & Hindi)
+* **Seamless Voice Commands:** Shop owners can record audio/voice notes in Telegram instead of typing out complex orders.
+* **Ultrafast Transcription (~0.4s):** Powered by Groq's `whisper-large-v3` engine.
+* **Trilingual Kirana Biasing:** Specifically prompted to handle Indian regional languages and colloquial speech:
+  * **English:** Standard Kirana terms (*"Add 2 packets of Maggi, bill to Suresh on UPI"*).
+  * **Tamil (தமிழ் / Tanglish):** (*"இரண்டு பாக்கெட் மேகி, ஒரு கிலோ சர்க்கரை பில் போடுங்க"*, *"2 packet Maggi bill podunga"*).
+  * **Hindi (हिंदी / Hinglish):** (*"दो पैकेट मैगी और एक किलो चीनी का बिल बनाओ"*, *"2 packet Maggi aur 1kg chini ka bill bana do"*).
+* **Language-Preserving AI Responses:** The agent automatically replies in the user's spoken language while executing the underlying database tools directly.
+
+### 2. 📦 FEFO (First Expiring, First Out) Batch Inventory
+* **Smart Batch Tracking:** Products track batch IDs, arrival dates, and expiry dates.
+* **Auto-Deduction by Expiry:** Billing automatically decrements items from the earliest-expiring batch first, minimizing spoilage and stock waste.
+* **Near-Expiry Alerts:** Proactive warnings for items approaching expiry within 30 days.
+* **Loose vs. Packaged Units:** Accurate decimal accounting for loose goods (kg, litre) vs discrete packaged units (packets, bottles).
+
+### 3. 💳 Customer Khata Credit Guards & Friendly Reminders
+* **Hard Credit Limits:** Enforces customer-specific credit caps (`credit_limit`). Attempting to add credit to a ledger exceeding the limit automatically refuses the charge.
+* **One-Click Payment Reminders:** Automatically drafts friendly Rupee-formatted payment reminder messages for pending balances above customizable thresholds.
+* **Repayment Recording:** Real-time ledger settlement with timestamped audit trail records.
+
+### 4. 📈 Sales Velocity Analytics & Smart Reordering
+* **Data-Driven Reordering:** Calculates daily burn rates (`avg_daily_velocity`) over 7–90 day rolling windows.
+* **Days of Cover Metrics:** Identifies items whose remaining stock will deplete before the cover horizon, preventing stockouts during high sales volume periods.
+
+### 5. 🛡️ Advanced Security & Hardening
+* **PBKDF2-HMAC-SHA256 Password Hashing:** 100,000 rounds with per-user cryptographically random 16-byte salts.
+* **Brute-Force Lockout:** Automatically throttles accounts for 5 minutes after 5 consecutive failed login attempts.
+* **Persistent Rate Limiting:** Token-bucket rate limiter persisted in PostgreSQL across server restarts and multiple worker instances.
+* **Path-Traversal Defense:** Canonical path verification (`is_safe_generated_file`) ensuring no unauthorized directory access.
+* **Daily Morning Auto-Logout:** Automatic logout daemon clears sessions daily between 4:00 AM – 5:00 AM IST (at 04:30 AM IST cutoff).
 
 ---
 
 ## 📱 Complete Telegram Bot Command Menu
-
-The bot automatically registers its command menu with the Telegram API:
 
 | Command | Description | Example Usage |
 |---|---|---|
@@ -43,72 +68,60 @@ The bot automatically registers its command menu with the Telegram API:
 
 ---
 
-## 🏗️ Agent Design, Harness & Technical Architecture
+## 🏗️ Agent Design & Architecture
 
-### 1. 🧠 The Agent Harness Picked & Why
-We selected the **OpenAI-Compatible Function-Calling Harness** (`agent/harness.py`) backed by **Ollama Cloud** (`nemotron-3-super`):
-* **Why Function Calling?** Traditional text/regex parsing of LLM outputs is fragile and prone to syntax failures. Standardized JSON tool schemas guarantee strict type enforcement, deterministic parameter extraction, and reliable tool execution for critical financial and inventory operations (GST, billing, stock receipts).
-* **Dual API Key Failover Pool:** Supports multiple API key environment variables (`LLM_API_KEY_1`, `LLM_API_KEY_2`) with round-robin load distribution. If a 429 rate limit error occurs, the harness automatically fails over to the next key without failing user requests.
-
----
-
-### 2. 🔄 How the Agent Control Loop Works (`agent/control_loop.py`)
 ```
-Telegram User Message (update_id)
+Telegram Voice Note / Text Message (update_id)
        │
        ▼
- 1. Check Idempotency Log ──(If already processed)──► Return Cached Preview
+ 1. Check Idempotency Cache ──(If duplicate)──► Return Cached Reply
        │
        ▼
- 2. Load Active Shop Session & Standing Preferences from PostgreSQL
+ 2. Transcribe Audio (Groq Whisper: English / Tamil / Hindi)
        │
        ▼
- 3. Build Dynamic System Prompt (System Instructions + Shop Meta + Standing Preferences)
+ 3. Load Active Shop Session & Standing Preferences from Prisma Cloud PostgreSQL
        │
        ▼
- 4. Multi-Step LLM Tool Execution Loop:
-    ├── Call LLM API (with round-robin key rotation & failover)
-    ├── If Tool Call Requested:
-    │     ├── Inject owner_id / update_id into tool arguments
-    │     ├── Execute target Python Skill in /skills
-    │     ├── Auto-update default_payment_mode if payment mode supplied
-    │     └── Pass tool result JSON back to LLM context
-    └── Repeat until LLM returns final natural language response
+ 4. Build Dynamic Grounded System Prompt
        │
        ▼
- 5. Smart Context Compression (If history > 10 messages, summarize older turns)
+ 5. Function-Calling Loop (Ollama Cloud / Groq with key failover):
+    ├── Execute Target Tool (/skills: inventory, billing, khata, analytics, docgen)
+    ├── Atomic Transactions (FOR UPDATE row-level locks, FEFO deduction)
+    └── Pass JSON Results back to Agent
        │
        ▼
- Deliver Response & Generated Files (PDF / PPTX) to Telegram User
+ 6. Context Compression & Delivery:
+    ├── Deliver response text in user's language (EN / TA / HI)
+    └── Send generated documents (ReportLab PDF / python-pptx PPTX)
 ```
 
 ---
 
-### 3. 🛠️ Skill & Tool Architecture (`/skills`)
-Business logic is decoupled into domain-specific modules under `/skills`:
-* **Inventory (`skills/inventory.py`):** Transactional stock lookup, receipt, catalog management, 2-step GST updates, low stock intimations.
-* **Multi-Item GST Billing (`skills/billing.py`):** Draft bill state management, stock reservation, oversell checking, `quick_create_bill` 1-turn generation.
-* **Khata Credit Ledger (`skills/credit.py`):** Customer balance tracking, credit charging, repayment recording.
-* **Analytics (`skills/analytics.py`):** Daily sales aggregation, payment mode splits, day closeout reports.
-* **Document Generation (`skills/documents.py` & `docgen/`):** ReportLab PDF invoice builder & 4-slide widescreen PowerPoint Matplotlib deck builder.
-* **Audit Trail (`skills/audit.py`):** Immutably logs before/after values for all business mutations.
-* **Auth & Preferences (`skills/auth.py` & `skills/preferences.py`):** Multi-tenant shop authentication and persistent standing preferences.
+## 🧪 Comprehensive Automated Test Suite (84 Tests - 100% Passed)
 
----
+The entire application is covered by **84 automated tests** running against Prisma Cloud PostgreSQL:
 
-### 4. 💡 How Each Hard Part Was Solved
+```bash
+pytest tests/ -v
+```
 
-| Hard Requirement | Technical Solution |
-|---|---|
-| **Zero Hallucinations & Grounding** | All product prices, stock quantities, GST slabs, and customer balances MUST originate from database tool outputs. System prompt explicitly forbids model guessing. |
-| **Oversell Protection & Concurrency** | Enforced atomically inside PostgreSQL transactions (`immediate_transaction`). Quantity is checked at row level before decrementing stock. If requested quantity > available stock, transaction rolls back and returns an `OversellGuardError`. |
-| **Deterministic GST Math** | Handled by a pure Python function `_calculate_gst()`. Calculates intra-state CGST (50%) and SGST (50%) deterministically per line item, avoiding LLM floating point rounding errors. |
-| **Multi-Turn Bills** | Draft bills persist in PostgreSQL across chat turns with status `'draft'` until the shop owner explicitly finalizes them. |
-| **Telegram Network Retries & Idempotency** | Every Telegram update carries a unique `update_id`. Checked against `idempotency_log` table before execution; duplicate requests return cached results without double-billing or double-decrementing stock. |
-| **Multi-Tenant Shop Auth & Isolation** | Session tokens expire after 24h of inactivity. All database queries enforce owner scoping (`owner_id`), isolating inventory and financial ledgers per shop. |
-| **2-Step Verified Government GST Updates** | When users request a GST rate change, the agent checks current catalog rates, displays an explicit confirmation card (`⚠️ CONFIRM GST SLAB UPDATE`), and executes `update_gst_slab` ONLY after explicit `YES` confirmation. |
-| **Token Cost & Context Optimization** | Smart Context Compression summarizes earlier turns when chat history exceeds 10 messages, cutting LLM token costs by ~60–70%. `quick_create_bill` executes multi-item billing in 1 single turn. |
-| **Real Document Artifact Generation** | ReportLab PDF invoices and 4-slide Matplotlib PPTX decks query 100% live database figures (zero hardcoded fallback numbers) and deliver files directly via Telegram. |
+### Test Suite Summary:
+* **[tests/test_auth.py](file:///f:/Anbu%20Final%20Year%20Project/SuperMarket%20ops%20Agent/tests/test_auth.py)** (6 tests): PBKDF2 hashing, multi-tenant session isolation, daily morning auto-logout.
+* **[tests/test_billing_edge_cases.py](file:///f:/Anbu%20Final%20Year%20Project/SuperMarket%20ops%20Agent/tests/test_billing_edge_cases.py)** (10 tests): Multi-item bills, credit limit rejection, discount caps.
+* **[tests/test_gst_calc.py](file:///f:/Anbu%20Final%20Year%20Project/SuperMarket%20ops%20Agent/tests/test_gst_calc.py)** (9 tests): Deterministic CGST/SGST/IGST math, rounding accuracy.
+* **[tests/test_inventory_edge_cases.py](file:///f:/Anbu%20Final%20Year%20Project/SuperMarket%20ops%20Agent/tests/test_inventory_edge_cases.py)** (12 tests): FEFO expiry batch ordering, loose goods decimal quantities, low-stock warnings.
+* **[tests/test_ollama_cloud_config.py](file:///f:/Anbu%20Final%20Year%20Project/SuperMarket%20ops%20Agent/tests/test_ollama_cloud_config.py)** (3 tests): LLM provider failover and cloud connectivity.
+* **[tests/test_oversell.py](file:///f:/Anbu%20Final%20Year%20Project/SuperMarket%20ops%20Agent/tests/test_oversell.py)** (6 tests): Concurrent multi-cashier locking and oversell prevention.
+* **[tests/test_docgen_and_harness.py](file:///f:/Anbu%20Final%20Year%20Project/SuperMarket%20ops%20Agent/tests/test_docgen_and_harness.py)** (6 tests): ReportLab PDF invoices, PPTX decks, zero-sales chart rendering.
+* **[tests/test_idempotency.py](file:///f:/Anbu%20Final%20Year%20Project/SuperMarket%20ops%20Agent/tests/test_idempotency.py)** (3 tests): Atomic Telegram `update_id` claim and cached replay.
+* **[tests/test_security_hardening.py](file:///f:/Anbu%20Final%20Year%20Project/SuperMarket%20ops%20Agent/tests/test_security_hardening.py)** (10 tests): Persistent token-bucket rate limiter, brute-force lockouts, GSTIN regex validation, path traversal defense.
+* **[tests/test_audit_trail.py](file:///f:/Anbu%20Final%20Year%20Project/SuperMarket%20ops%20Agent/tests/test_audit_trail.py)** (5 tests): Immutable financial, khata, and stock audit logging.
+* **[tests/test_agent_flow.py](file:///f:/Anbu%20Final%20Year%20Project/SuperMarket%20ops%20Agent/tests/test_agent_flow.py)** (9 tests): System prompt rules, tool dispatch table, khata reminders, Indian currency words.
+* **[tests/test_analytics_and_concurrency.py](file:///f:/Anbu%20Final%20Year%20Project/SuperMarket%20ops%20Agent/tests/test_analytics_and_concurrency.py)** (5 tests): Sales velocity, days of cover, reorder suggestion calculation.
+
+**Result: 84 / 84 Passed (100% Success Rate) ✅**
 
 ---
 
@@ -127,8 +140,9 @@ python -m venv venv
 # Install dependencies
 pip install -r requirements.txt
 
-# Configure .env file
+# Configure environment variables
 cp .env.example .env
+# Fill in TELEGRAM_BOT_TOKEN, DATABASE_URL, GROQ_API_KEY, OLLAMA_CLOUD_API_KEY
 
 # Run test suite
 pytest tests/ -v
@@ -137,78 +151,16 @@ pytest tests/ -v
 python bot.py
 ```
 
-### 2. 🌐 Render Cloud Web Service Deployment (Live Deployed)
-This bot is **deployed live on Render** and includes a built-in HTTP health-check server listening on port `PORT` (`8080`) specifically designed for **Render Web Services**:
-
-1. Create a new **Web Service** on [Render.com](https://render.com).
-2. Connect your GitHub repository `Anbu2005-svg/SuperMart_Agent`.
-3. Set the following build and start configurations:
+### 2. 🌐 Render Cloud Web Service Deployment
+1. Connect your repository `Anbu2005-svg/SuperMart_Agent` on [Render.com](https://render.com).
+2. Configure settings:
    * **Runtime**: Python 3
    * **Build Command**: `pip install -r requirements.txt`
    * **Start Command**: `python bot.py`
-4. Add Environment Variables in Render Dashboard:
-   * `TELEGRAM_BOT_TOKEN`: Your Telegram Bot Token from @BotFather
-   * `DATABASE_URL`: Cloud PostgreSQL Connection String (Supabase/Neon/Render)
-   * `LLM_API_KEY_1`: Your Ollama Cloud / OpenAI API key
-   * `PORT`: `8080`
-5. Render automatically builds the service, binds to port `8080`, and runs **Live** 24/7!
-
----
-
-## 📦 Initial 10-Product Inventory Dataset
-
-Pre-populated in database via `db/seed.py`:
-
-| # | Product Name | Category | Stock | Unit | MRP | GST |
-|---|---|---|---|---|---|---|
-| 1 | Brooke Bond Red Label Tea 250g | Beverages | 15 | packet | ₹140 | 5% |
-| 2 | Amul Pasteurised Butter 100g | Dairy | 20 | packet | ₹62 | 12% |
-| 3 | Amul Taaza Toned Milk 1L | Dairy | 25 | packet | ₹56 | 0% |
-| 4 | Fortune Sunlite Sunflower Oil 1L | Edible Oils | 40 | litre | ₹155 | 5% |
-| 5 | Aashirvaad Whole Wheat Atta 5kg | Grains & Flour | 30 | packet | ₹245 | 5% |
-| 6 | Basmati Rice 1kg (Loose) | Grains & Flour | 50 | kg | ₹80 | 0% |
-| 7 | Refined White Sugar 1kg (Loose) | Pantry Basics | 60 | kg | ₹48 | 0% |
-| 8 | Tata Iodized Salt 1kg | Pantry Basics | 45 | packet | ₹28 | 0% |
-| 9 | Surf Excel Easy Wash Detergent Powder 1kg | Household Care | 25 | packet | ₹140 | 18% |
-| 10 | Maggi 2-Minute Instant Noodles 70g | Snacks & Packaged Food | 100 | packet | ₹14 | 18% |
-
----
-
-## 🧪 Comprehensive Automated Test Suite (41 Tests)
-
-Run all 41 unit and integration tests:
-```bash
-pytest tests/ -v
-```
-
-Tests cover end-to-end multi-item billing, oversell protection, ReportLab PDF generation, Matplotlib PPTX chart rendering, 5-cashier concurrent PostgreSQL write locking, Telegram update idempotency, and audit event logs.
-
----
-
-## ✨ Unique Features & Key Highlights
-
-### 1. 🔐 Multi-Tenant Shop Owner Authentication (Login & Signup)
-* Supports full multi-tenant isolation where each shop owner operates securely under their own shop identity.
-* **New Shop Signup**: Allows new shop owners to register their store credentials (`shop_name`, `shop_address`, `shop_gstin`, password) directly via Telegram contact sharing or interactive prompts.
-* **Existing User Login**: Returning shop owners log in instantly with their credentials. Session state persists across chats and automatically expires after 24 hours of inactivity.
-* **Preserves Data Safety**: Multi-tenant database schema ensures inventory, bills, and Khata ledgers remain 100% isolated per shop session.
-
-### 2. 🌐 2-Step Verified Government GST Slab Rate Updates
-* **Government GST Update Handling**: When a shop owner mentions a GST slab revision (e.g. *"Government updated GST on Sugar to 5%"* or *"Verify new GST rate for Rice"*), the agent does NOT modify catalog data blindly.
-* **2-Step Verification Flow**:
-  1. The agent inspects current catalog rates using search tools.
-  2. The agent presents an explicit confirmation card to the shop owner:
-     ```text
-     ⚠️ CONFIRM GST SLAB UPDATE:
-     • Target: Refined White Sugar 1kg [SKU-SUGAR-1K]
-     • Current GST: 0% ➔ Proposed New GST: 5%
-     Please reply 'YES' to confirm and update catalog.
-     ```
-  3. Only after the user confirms with `YES` / `confirm` / `ok`, the agent invokes `update_gst_slab` to commit changes to PostgreSQL.
-
-### 3. 🛡️ Intelligent Token-Cost & Context Optimization Guardrails
-To reduce LLM token consumption, eliminate API rate limits, and cut operational LLM costs by **60% to 70%**:
-* **Smart Context Compression**: Automatically summarizes older chat history turns when conversation length exceeds 10 turns. Keeps system prompt & recent turns intact while compressing earlier turns into a compact highlight block, preventing token explosion.
-* **Ultrafast Single-Turn Execution Guard**: Executes complex multi-item billing (`quick_create_bill`) or stock receipts in 1 single LLM turn rather than forcing multi-turn search/query roundtrips.
-* **Dual API Key Failover & Round-Robin Load Balancing**: Automatically failovers across `LLM_API_KEY_1`, `LLM_API_KEY_2`, etc. when hitting 429 rate limit errors, distributing concurrent shop traffic seamlessly.
-* **Sticky Default Payment Mode Persistence**: Remembers the shop owner's preferred payment mode (e.g., `UPI`) in PostgreSQL so subsequent bills automatically finalize via `UPI` without requiring the user to re-type the payment mode every time.
+3. Add Environment Variables:
+   * `TELEGRAM_BOT_TOKEN`: Telegram bot token from @BotFather
+   * `DATABASE_URL`: Prisma Cloud / PostgreSQL connection string
+   * `GROQ_API_KEY`: Groq API key for Whisper voice processing
+   * `LLM_API_KEY_1`: Primary LLM API key
+   * `PORT`: `8080` (binds automatically to built-in health check server)
+4. Deploy and enjoy 24/7 automated Kirana operations!
