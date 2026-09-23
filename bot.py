@@ -123,8 +123,8 @@ def is_safe_generated_file(file_path: str) -> bool:
     if not file_path or not isinstance(file_path, str):
         return False
     try:
-        safe_base = os.path.abspath("generated_docs")
-        target_path = os.path.abspath(file_path)
+        safe_base = os.path.realpath(os.path.abspath("generated_docs"))
+        target_path = os.path.realpath(os.path.abspath(file_path))
         return os.path.commonpath([safe_base, target_path]) == safe_base and os.path.isfile(target_path)
     except Exception:
         return False
@@ -863,6 +863,108 @@ def start_weekly_deck_scheduler():
     print(f"📊 Weekly analysis deck scheduler active (every Sunday {target_hour:02d}:00 IST).")
 
 
+# ── Proactive Smart Notifications Scheduler ──────────────────────────
+def start_proactive_notifications_scheduler():
+    """Start APScheduler for proactive Telegram alerts: expiry, low-stock, daily summary."""
+    try:
+        from apscheduler.schedulers.background import BackgroundScheduler
+        from apscheduler.triggers.cron import CronTrigger
+        import pytz
+    except ImportError:
+        logger.warning("⚠️ APScheduler not installed — proactive notifications disabled. Run: pip install APScheduler")
+        return
+
+    ist = pytz.timezone("Asia/Kolkata")
+    scheduler = BackgroundScheduler(timezone=ist)
+
+    def _get_all_active_chat_ids():
+        """Get all authenticated Telegram user IDs to send alerts to."""
+        try:
+            from db.models import get_db_connection
+            conn = get_db_connection()
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT telegram_id FROM user_sessions")
+                rows = cur.fetchall()
+                cur.close()
+                return [r["telegram_id"] for r in rows]
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.warning(f"Could not fetch chat IDs for notifications: {e}")
+            return []
+
+    def _send_notification(message: str):
+        """Send a message to all authenticated users."""
+        token = os.getenv("TELEGRAM_BOT_TOKEN")
+        if not token:
+            return
+        chat_ids = _get_all_active_chat_ids()
+        if not chat_ids:
+            return
+        import asyncio
+        from telegram import Bot
+        bot = Bot(token=token)
+
+        async def _send_all():
+            for cid in chat_ids:
+                try:
+                    await bot.send_message(chat_id=cid, text=message, parse_mode="Markdown")
+                except Exception as e:
+                    logger.warning(f"Notification send failed for {cid}: {e}")
+
+        try:
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(_send_all())
+            loop.close()
+        except Exception as e:
+            logger.warning(f"Notification dispatch error: {e}")
+
+    def job_expiry_alerts():
+        """9 AM IST — Check expiring stock and alert."""
+        try:
+            from skills.notifications import check_expiring_stock
+            result = check_expiring_stock(days_ahead=7)
+            if result.get("count", 0) > 0:
+                _send_notification(result["message"])
+                logger.info(f"📦 Sent {result['count']} expiry alert(s)")
+        except Exception as e:
+            logger.error(f"Expiry alert job error: {e}")
+
+    def job_low_stock_check():
+        """Every 4 hours — Check critically low stock."""
+        try:
+            from skills.notifications import check_critical_low_stock
+            result = check_critical_low_stock()
+            if result.get("count", 0) > 0:
+                _send_notification(result["message"])
+                logger.info(f"📉 Sent {result['count']} low-stock alert(s)")
+        except Exception as e:
+            logger.error(f"Low stock alert job error: {e}")
+
+    def job_daily_closeout():
+        """9 PM IST — Send daily closeout summary."""
+        try:
+            from skills.notifications import generate_daily_closeout_message
+            result = generate_daily_closeout_message()
+            if result.get("status") == "success":
+                _send_notification(result["message"])
+                logger.info(f"📊 Sent daily closeout summary (₹{result.get('revenue', 0)})")
+        except Exception as e:
+            logger.error(f"Daily closeout job error: {e}")
+
+    # Schedule jobs
+    scheduler.add_job(job_expiry_alerts, CronTrigger(hour=9, minute=0), id="expiry_alerts")
+    scheduler.add_job(job_low_stock_check, CronTrigger(hour="*/4", minute=30), id="low_stock_check")
+    scheduler.add_job(job_daily_closeout, CronTrigger(hour=21, minute=0), id="daily_closeout")
+
+    scheduler.start()
+    print("🔔 Proactive notifications scheduler started:")
+    print("   ⏰ 9:00 AM IST  → Expiry alerts (items expiring within 7 days)")
+    print("   ⏰ Every 4 hours → Low-stock warnings")
+    print("   ⏰ 9:00 PM IST  → Daily closeout summary")
+
+
 def main():
     """Main application entry point."""
     token = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -881,6 +983,9 @@ def main():
 
     # Start scheduled weekly analysis deck auto-sender (optional, WEEKLY_DECK_ENABLED=true)
     start_weekly_deck_scheduler()
+
+    # Start proactive notification scheduler (expiry alerts, low-stock, daily summary)
+    start_proactive_notifications_scheduler()
 
     app = ApplicationBuilder().token(token).post_init(post_init).build()
 

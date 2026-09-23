@@ -246,3 +246,20 @@ CREATE TABLE IF NOT EXISTS user_rate_limits (
     last_updated DOUBLE PRECISION NOT NULL
 );
 
+-- ══════════════════════════════════════════════════════════════════
+-- RETURNS & REFUND MANAGEMENT
+-- ══════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS returns (
+    return_id VARCHAR(255) PRIMARY KEY,
+    bill_id VARCHAR(255) NOT NULL REFERENCES bills(bill_id) ON DELETE CASCADE,
+    sku_id VARCHAR(255) NOT NULL REFERENCES products(sku_id) ON DELETE CASCADE,
+    qty DOUBLE PRECISION NOT NULL,
+    refund_amount DOUBLE PRECISION NOT NULL,
+    reason TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_returns_bill ON returns(bill_id);
+CREATE INDEX IF NOT EXISTS idx_returns_sku ON returns(sku_id);
+

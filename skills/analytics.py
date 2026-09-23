@@ -248,3 +248,267 @@ def reorder_suggestions(velocity_days: int = 7, cover_days: int = 7) -> Dict[str
         }
     finally:
         conn.close()
+
+
+def sales_forecast(days_history: int = 30, forecast_days: int = 7) -> Dict[str, Any]:
+    """
+    AI-powered demand prediction using moving average sales velocity.
+    Predicts next `forecast_days` demand per product based on `days_history` of sales data.
+    Flags items likely to stockout before the forecast horizon.
+    """
+    try:
+        dh_int = int(days_history)
+        fd_int = int(forecast_days)
+    except (ValueError, TypeError):
+        return {"status": "error", "message": "days_history and forecast_days must be valid integers."}
+    days_history = max(7, min(90, dh_int))
+    forecast_days = max(1, min(30, fd_int))
+    start = (date.today() - timedelta(days=days_history - 1)).isoformat()
+
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+
+        # Get sales velocity per product over the history window
+        cur.execute("""
+            SELECT bi.sku_id, p.name, p.unit, p.quantity AS current_stock,
+                   p.reorder_level, SUM(bi.qty) AS total_sold
+            FROM bill_items bi
+            JOIN bills b ON bi.bill_id = b.bill_id
+            JOIN products p ON bi.sku_id = p.sku_id
+            WHERE b.status = 'finalized' AND b.finalized_at::date >= %s::date
+              AND p.is_active = TRUE
+            GROUP BY bi.sku_id, p.name, p.unit, p.quantity, p.reorder_level
+            ORDER BY total_sold DESC
+        """, (start,))
+        rows = cur.fetchall()
+        cur.close()
+
+        forecasts: List[Dict[str, Any]] = []
+        stockout_alerts: List[str] = []
+
+        for r in rows:
+            total_sold = float(r["total_sold"])
+            daily_velocity = round(total_sold / days_history, 2)
+            predicted_demand = round(daily_velocity * forecast_days, 1)
+            current_stock = r["current_stock"]
+            days_until_stockout = round(current_stock / daily_velocity, 1) if daily_velocity > 0 else None
+
+            will_stockout = days_until_stockout is not None and days_until_stockout < forecast_days
+            risk = "🔴 HIGH" if will_stockout else (
+                "🟡 MEDIUM" if days_until_stockout and days_until_stockout < forecast_days * 2 else "🟢 LOW"
+            )
+
+            forecast = {
+                "sku_id": r["sku_id"],
+                "name": r["name"],
+                "unit": r["unit"],
+                "current_stock": current_stock,
+                "daily_velocity": daily_velocity,
+                "predicted_demand": predicted_demand,
+                "days_until_stockout": days_until_stockout,
+                "stockout_risk": risk,
+                "suggested_order": max(0, round(predicted_demand - current_stock, 1)) if will_stockout else 0
+            }
+            forecasts.append(forecast)
+
+            if will_stockout:
+                stockout_alerts.append(
+                    f"⚠️ {r['name']}: stocks out in ~{days_until_stockout} days "
+                    f"(need {predicted_demand} {r['unit']}, have {current_stock})"
+                )
+
+        lines = [f"📊 **Sales Forecast** (next {forecast_days} days based on {days_history}-day history):\n"]
+        if stockout_alerts:
+            lines.append(f"🚨 **{len(stockout_alerts)} Stockout Risk(s):**")
+            lines.extend(stockout_alerts)
+        else:
+            lines.append("✅ No stockout risks detected for the forecast period.")
+
+        lines.append(f"\n📈 Tracked {len(forecasts)} active product(s) with recent sales.")
+
+        return {
+            "status": "success",
+            "forecast_days": forecast_days,
+            "history_days": days_history,
+            "product_count": len(forecasts),
+            "stockout_risks": len(stockout_alerts),
+            "forecasts": forecasts,
+            "message": "\n".join(lines)
+        }
+    finally:
+        conn.close()
+
+
+def profit_loss_report(days: int = 30) -> Dict[str, Any]:
+    """
+    Generate Profit & Loss report:
+      - Total Revenue, COGS, Gross Profit, Gross Margin %
+      - GST Collected (government liability)
+      - Per-product profitability (top 10 most/least profitable)
+    """
+    try:
+        days_int = int(days)
+    except (ValueError, TypeError):
+        return {"status": "error", "message": "days must be a valid integer."}
+    days = max(1, min(365, days_int))
+    start = (date.today() - timedelta(days=days - 1)).isoformat()
+
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+
+        # Revenue & GST from finalized bills
+        cur.execute("""
+            SELECT COALESCE(SUM(subtotal), 0) AS revenue,
+                   COALESCE(SUM(cgst + sgst), 0) AS gst_collected,
+                   COALESCE(SUM(total), 0) AS total_with_gst,
+                   COUNT(*) AS bill_count
+            FROM bills
+            WHERE status = 'finalized' AND finalized_at::date >= %s::date
+        """, (start,))
+        summary = cur.fetchone()
+
+        # COGS: cost_price × qty for each sold item
+        cur.execute("""
+            SELECT bi.sku_id, p.name, p.cost_price, p.mrp, p.unit,
+                   SUM(bi.qty) AS qty_sold,
+                   SUM(bi.qty * p.cost_price) AS cogs,
+                   SUM(bi.qty * bi.unit_price) AS revenue,
+                   SUM(bi.qty * (bi.unit_price - p.cost_price)) AS gross_profit
+            FROM bill_items bi
+            JOIN bills b ON bi.bill_id = b.bill_id
+            JOIN products p ON bi.sku_id = p.sku_id
+            WHERE b.status = 'finalized' AND b.finalized_at::date >= %s::date
+            GROUP BY bi.sku_id, p.name, p.cost_price, p.mrp, p.unit
+            ORDER BY gross_profit DESC
+        """, (start,))
+        product_rows = cur.fetchall()
+        cur.close()
+
+        total_revenue = round(summary["revenue"], 2)
+        gst_collected = round(summary["gst_collected"], 2)
+        total_cogs = round(sum(float(r["cogs"]) for r in product_rows), 2)
+        gross_profit = round(total_revenue - total_cogs, 2)
+        gross_margin = round((gross_profit / total_revenue) * 100, 1) if total_revenue > 0 else 0.0
+
+        # Per-product profitability
+        product_profits = [{
+            "name": r["name"],
+            "qty_sold": round(float(r["qty_sold"]), 2),
+            "unit": r["unit"],
+            "revenue": round(float(r["revenue"]), 2),
+            "cogs": round(float(r["cogs"]), 2),
+            "gross_profit": round(float(r["gross_profit"]), 2),
+            "margin_pct": round((float(r["gross_profit"]) / float(r["revenue"])) * 100, 1) if float(r["revenue"]) > 0 else 0.0
+        } for r in product_rows]
+
+        top_profitable = product_profits[:10]
+        least_profitable = sorted(product_profits, key=lambda x: x["gross_profit"])[:5]
+
+        lines = [
+            f"💰 **Profit & Loss Report** (last {days} days)\n",
+            f"📊 **Revenue:** ₹{total_revenue:,.2f} ({summary['bill_count']} bills)",
+            f"📦 **Cost of Goods Sold:** ₹{total_cogs:,.2f}",
+            f"📈 **Gross Profit:** ₹{gross_profit:,.2f}",
+            f"📐 **Gross Margin:** {gross_margin}%",
+            f"🧾 **GST Collected:** ₹{gst_collected:,.2f} (govt liability)",
+        ]
+
+        if top_profitable:
+            lines.append("\n🏆 **Top 5 Most Profitable Products:**")
+            for i, p in enumerate(top_profitable[:5], 1):
+                lines.append(f"   {i}. {p['name']} — ₹{p['gross_profit']:,.2f} ({p['margin_pct']}% margin)")
+
+        return {
+            "status": "success",
+            "period_days": days,
+            "total_revenue": total_revenue,
+            "total_cogs": total_cogs,
+            "gross_profit": gross_profit,
+            "gross_margin_pct": gross_margin,
+            "gst_collected": gst_collected,
+            "bill_count": summary["bill_count"],
+            "top_profitable": top_profitable,
+            "least_profitable": least_profitable,
+            "message": "\n".join(lines)
+        }
+    finally:
+        conn.close()
+
+
+def customer_insights(days: int = 30, top_n: int = 10) -> Dict[str, Any]:
+    """
+    Top customers by spend, visit frequency, average bill size, and loyalty tier.
+    """
+    try:
+        days_int = int(days)
+        top_n_int = int(top_n)
+    except (ValueError, TypeError):
+        return {"status": "error", "message": "days and top_n must be valid integers."}
+    days = max(1, min(365, days_int))
+    top_n = max(1, min(50, top_n_int))
+    start = (date.today() - timedelta(days=days - 1)).isoformat()
+
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT c.name, c.phone, c.khata_balance,
+                   COUNT(b.bill_id) AS visit_count,
+                   COALESCE(SUM(b.total), 0) AS total_spend,
+                   COALESCE(AVG(b.total), 0) AS avg_bill_size,
+                   MAX(b.finalized_at) AS last_visit
+            FROM customers c
+            LEFT JOIN bills b ON b.customer_id = c.customer_id
+                AND b.status = 'finalized' AND b.finalized_at::date >= %s::date
+            GROUP BY c.customer_id, c.name, c.phone, c.khata_balance
+            HAVING COUNT(b.bill_id) > 0
+            ORDER BY total_spend DESC
+            LIMIT %s
+        """, (start, top_n))
+        rows = cur.fetchall()
+        cur.close()
+
+        customers: List[Dict[str, Any]] = []
+        for r in rows:
+            total_spend = round(float(r["total_spend"]), 2)
+            # Loyalty tier based on spend in period
+            if total_spend >= 10000:
+                tier = "🥇 Gold"
+            elif total_spend >= 5000:
+                tier = "🥈 Silver"
+            elif total_spend >= 1000:
+                tier = "🥉 Bronze"
+            else:
+                tier = "⭐ Regular"
+
+            customers.append({
+                "name": r["name"],
+                "phone": r["phone"] or "N/A",
+                "visit_count": r["visit_count"],
+                "total_spend": total_spend,
+                "avg_bill_size": round(float(r["avg_bill_size"]), 2),
+                "khata_pending": round(float(r["khata_balance"]), 2),
+                "last_visit": str(r["last_visit"]) if r["last_visit"] else "N/A",
+                "loyalty_tier": tier
+            })
+
+        lines = [f"👥 **Top {len(customers)} Customers** (last {days} days):\n"]
+        for i, c in enumerate(customers, 1):
+            lines.append(
+                f"{i}. {c['loyalty_tier']} **{c['name']}** — "
+                f"₹{c['total_spend']:,.2f} ({c['visit_count']} visit{'s' if c['visit_count'] != 1 else ''}, "
+                f"avg ₹{c['avg_bill_size']:,.2f}/bill)"
+            )
+
+        return {
+            "status": "success",
+            "period_days": days,
+            "count": len(customers),
+            "customers": customers,
+            "message": "\n".join(lines)
+        }
+    finally:
+        conn.close()
+

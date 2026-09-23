@@ -695,3 +695,90 @@ def quick_create_bill(
         if warnings:
             preview["warnings"] = warnings
         return preview
+
+
+def generate_digital_receipt(bill_id: str) -> Dict[str, Any]:
+    """
+    Generate a beautifully formatted text receipt for a finalized bill.
+    Designed for easy copy-paste/forward on WhatsApp or Telegram.
+    """
+    if not bill_id or not isinstance(bill_id, str):
+        return {"status": "error", "message": "bill_id is required."}
+
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM bills WHERE bill_id = %s", (bill_id.strip(),))
+        bill = cur.fetchone()
+        if not bill:
+            cur.close()
+            return {"status": "error", "message": f"Bill '{bill_id}' not found."}
+
+        cur.execute("""
+            SELECT bi.*, p.name, p.unit, p.hsn_code
+            FROM bill_items bi
+            JOIN products p ON bi.sku_id = p.sku_id
+            WHERE bi.bill_id = %s
+            ORDER BY p.name ASC
+        """, (bill_id,))
+        items = cur.fetchall()
+
+        # Get customer name if any
+        customer_name = "Walk-in Customer"
+        if bill.get("customer_id"):
+            cur.execute("SELECT name FROM customers WHERE customer_id = %s", (bill["customer_id"],))
+            cust = cur.fetchone()
+            if cust:
+                customer_name = cust["name"]
+
+        cur.close()
+
+        # Build receipt
+        separator = "─" * 32
+        lines = [
+            "🧾 *RECEIPT*",
+            separator,
+            f"📅 Date: {str(bill.get('finalized_at', bill['created_at']))[:16]}",
+            f"🔖 Bill: {bill_id}",
+        ]
+
+        if bill.get("invoice_number"):
+            lines.append(f"📄 Invoice #: {bill['invoice_number']}")
+
+        lines.extend([
+            f"👤 Customer: {customer_name}",
+            separator,
+        ])
+
+        # Itemized list
+        for i, item in enumerate(items, 1):
+            qty_str = f"{item['qty']:.0f}" if item['qty'] == int(item['qty']) else f"{item['qty']:.2f}"
+            lines.append(
+                f"{i}. {item['name']}\n"
+                f"   {qty_str} {item['unit']} × ₹{item['unit_price']:.2f} = ₹{item['line_total']:.2f}"
+            )
+
+        lines.extend([
+            separator,
+            f"💰 Subtotal: ₹{bill['subtotal']:.2f}",
+            f"🧾 CGST: ₹{bill['cgst']:.2f} | SGST: ₹{bill['sgst']:.2f}",
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            f"🏷️ *TOTAL: ₹{bill['total']:.2f}*",
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            f"💳 Payment: {(bill.get('payment_mode') or 'cash').upper()}",
+            "",
+            "🙏 Thank you for shopping with us!",
+            "📱 Powered by SuperMart AI 🛒"
+        ])
+
+        receipt_text = "\n".join(lines)
+
+        return {
+            "status": "success",
+            "bill_id": bill_id,
+            "receipt": receipt_text,
+            "message": receipt_text
+        }
+    finally:
+        conn.close()
+

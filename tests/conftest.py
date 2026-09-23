@@ -41,6 +41,7 @@ DB_AVAILABLE = _db_available()
 # Tables to truncate between tests (order matters for FKs; bills/bill_items via CASCADE)
 _TRUNCATE_TABLES = [
     "bill_items",
+    "returns",
     "bills",
     "khata_transactions",
     "stock_batches",

@@ -51,6 +51,16 @@ def _verify_password(password: str, stored_hash: str) -> Tuple[bool, bool]:
         return is_valid, True
 
 
+MAX_TRACKED_IDENTIFIERS = 1000
+
+
+def _prune_expired_failed_attempts(now: float) -> None:
+    """Evict expired failed login tracking entries to bound memory usage."""
+    expired = [k for k, v in _FAILED_LOGIN_ATTEMPTS.items() if v.get("locked_until", 0) <= now]
+    for k in expired:
+        _FAILED_LOGIN_ATTEMPTS.pop(k, None)
+
+
 def _check_rate_limit(identifier: str) -> Optional[str]:
     """Check if identifier is currently locked out from login attempts."""
     now = time.time()
@@ -62,8 +72,16 @@ def _check_rate_limit(identifier: str) -> Optional[str]:
 
 
 def _record_failed_attempt(identifier: str) -> None:
-    """Record a failed login attempt and apply lockout if threshold exceeded."""
+    """Record a failed login attempt and apply lockout if threshold exceeded with memory bounds."""
     now = time.time()
+    if len(_FAILED_LOGIN_ATTEMPTS) >= MAX_TRACKED_IDENTIFIERS:
+        _prune_expired_failed_attempts(now)
+        if len(_FAILED_LOGIN_ATTEMPTS) >= MAX_TRACKED_IDENTIFIERS:
+            # Force prune oldest entries to prevent memory exhaustion
+            excess = len(_FAILED_LOGIN_ATTEMPTS) - MAX_TRACKED_IDENTIFIERS + 100
+            for k in list(_FAILED_LOGIN_ATTEMPTS.keys())[:excess]:
+                _FAILED_LOGIN_ATTEMPTS.pop(k, None)
+
     record = _FAILED_LOGIN_ATTEMPTS.get(identifier, {"count": 0, "locked_until": 0})
     if record.get("locked_until", 0) <= now:
         record["count"] = record.get("count", 0) + 1

@@ -556,7 +556,11 @@ def update_gst_slab(
     if new_gst_slab not in [0, 5, 12, 18, 28]:
         return {"status": "error", "message": "GST slab must be one of standard rates: 0, 5, 12, 18, 28"}
 
-    if not sku_or_name and not category and not hsn_code:
+    sku_clean = sku_or_name.strip() if sku_or_name and isinstance(sku_or_name, str) else None
+    cat_clean = category.strip() if category and isinstance(category, str) else None
+    hsn_clean = hsn_code.strip() if hsn_code and isinstance(hsn_code, str) else None
+
+    if not sku_clean and not cat_clean and not hsn_clean:
         return {"status": "error", "message": "Specify at least one target: sku_or_name, category, or hsn_code"}
 
     conn = get_db_connection()
@@ -566,15 +570,15 @@ def update_gst_slab(
             query_conditions = []
             params = []
 
-            if sku_or_name:
+            if sku_clean:
                 query_conditions.append("(sku_id ILIKE %s OR name ILIKE %s)")
-                params.extend([f"%{sku_or_name.strip()}%", f"%{sku_or_name.strip()}%"])
-            if category:
+                params.extend([f"%{sku_clean}%", f"%{sku_clean}%"])
+            if cat_clean:
                 query_conditions.append("category ILIKE %s")
-                params.append(f"%{category.strip()}%")
-            if hsn_code:
+                params.append(f"%{cat_clean}%")
+            if hsn_clean:
                 query_conditions.append("hsn_code = %s")
-                params.append(hsn_code.strip())
+                params.append(hsn_clean)
 
             where_clause = " AND ".join(query_conditions)
 

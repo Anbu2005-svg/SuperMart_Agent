@@ -5,7 +5,7 @@ import logging
 from typing import Dict, Any, List, Callable
 from openai import OpenAI
 
-from skills import inventory, billing, credit, analytics, documents, preferences, audit
+from skills import inventory, billing, credit, analytics, documents, preferences, audit, notifications, gst_export, returns
 
 logger = logging.getLogger(__name__)
 
@@ -189,7 +189,17 @@ TOOL_DISPATCH: Dict[str, Callable] = {
     "generate_analysis_deck": documents.generate_analysis_deck,
     "set_preference": preferences.set_preference,
     "get_preference": preferences.get_preference,
-    "get_audit_trail": audit.get_audit_trail
+    "get_audit_trail": audit.get_audit_trail,
+    # ── New Features ──
+    "check_expiring_stock": notifications.check_expiring_stock,
+    "check_low_stock_alerts": notifications.check_critical_low_stock,
+    "sales_forecast": analytics.sales_forecast,
+    "profit_loss_report": analytics.profit_loss_report,
+    "customer_insights": analytics.customer_insights,
+    "export_gstr1": gst_export.export_gstr1,
+    "process_return": returns.process_return,
+    "list_returns": returns.list_returns,
+    "generate_digital_receipt": billing.generate_digital_receipt
 }
 
 # OpenAI-compatible tool schemas
@@ -711,6 +721,128 @@ TOOLS_SCHEMA = [
                     "event_type": {"type": "string", "description": "Optional event type filter, e.g. STOCK_DECREMENTED"},
                     "limit": {"type": "number", "description": "Max events to return (default 20)"}
                 }
+            }
+        }
+    },
+    # ── New Feature Tools ──
+    {
+        "type": "function",
+        "function": {
+            "name": "check_expiring_stock",
+            "description": "Check for stock batches expiring within the next N days. Proactive expiry alert.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days_ahead": {"type": "number", "description": "Days ahead to check for expiry (default 7)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_low_stock_alerts",
+            "description": "Check for items where stock is at or below reorder level. Proactive low-stock warning.",
+            "parameters": {"type": "object", "properties": {}}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "sales_forecast",
+            "description": "AI-powered sales demand forecast: predict next N days demand per product using moving average velocity. Flags stockout risks.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days_history": {"type": "number", "description": "Days of sales history to analyze (default 30)"},
+                    "forecast_days": {"type": "number", "description": "Days ahead to forecast demand (default 7)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "profit_loss_report",
+            "description": "Generate Profit & Loss report: revenue, COGS, gross profit, gross margin %, GST collected, and per-product profitability.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days": {"type": "number", "description": "Number of days to report on (default 30)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "customer_insights",
+            "description": "Top customers ranked by spend, visit frequency, average bill size, and loyalty tier (Gold/Silver/Bronze).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days": {"type": "number", "description": "Period in days (default 30)"},
+                    "top_n": {"type": "number", "description": "Number of top customers to return (default 10)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "export_gstr1",
+            "description": "Generate GSTR-1 tax return data (B2C summary + HSN-wise summary) as downloadable CSV files for Indian GST compliance.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "month": {"type": "number", "description": "Month number 1-12 (default current month)"},
+                    "year": {"type": "number", "description": "Year (default current year)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "process_return",
+            "description": "Process a product return against a finalized bill. Reverses stock, records refund, and creates audit trail.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "bill_id": {"type": "string", "description": "Bill ID to return against (e.g. 'BILL-7C9A41E2')"},
+                    "sku_or_name": {"type": "string", "description": "Product SKU or name to return"},
+                    "qty": {"type": "number", "description": "Quantity to return"},
+                    "reason": {"type": "string", "description": "Reason for return (e.g. 'Expired', 'Damaged', 'Customer changed mind')"}
+                },
+                "required": ["bill_id", "sku_or_name", "qty"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_returns",
+            "description": "List recent product returns, optionally filtered by bill ID.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "bill_id": {"type": "string", "description": "Optional bill ID to filter returns"},
+                    "days": {"type": "number", "description": "Number of recent days to list (default 7)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_digital_receipt",
+            "description": "Generate a beautifully formatted text receipt for a bill, designed for easy forwarding on WhatsApp or Telegram.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "bill_id": {"type": "string", "description": "Bill ID (e.g. 'BILL-7C9A41E2')"}
+                },
+                "required": ["bill_id"]
             }
         }
     }

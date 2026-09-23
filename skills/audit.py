@@ -3,16 +3,35 @@ from typing import Dict, Any, Optional
 from db.models import get_db_connection
 
 
+_SENSITIVE_KEY_PATTERNS = {"password", "token", "secret", "api_key", "pin", "auth"}
+
+
+def _sanitize_audit_details(val: Any) -> Any:
+    """Recursively mask sensitive keys in audit event details."""
+    if isinstance(val, dict):
+        sanitized = {}
+        for k, v in val.items():
+            if any(p in str(k).lower() for p in _SENSITIVE_KEY_PATTERNS):
+                sanitized[k] = "***REDACTED***"
+            else:
+                sanitized[k] = _sanitize_audit_details(v)
+        return sanitized
+    elif isinstance(val, list):
+        return [_sanitize_audit_details(item) for item in val]
+    return val
+
+
 def _log_event(conn, event_type, entity_type, entity_id, details=None,
                old_value=None, new_value=None):
     """Insert an audit row using the CALLER'S open connection/transaction.
     Must be called inside the caller's immediate_transaction block."""
+    sanitized = _sanitize_audit_details(details) if details else None
     cur = conn.cursor()
     cur.execute(
         "INSERT INTO audit_log (event_type, entity_type, entity_id, details, old_value, new_value) "
         "VALUES (%s, %s, %s, %s, %s, %s)",
         (event_type, entity_type, str(entity_id) if entity_id else None,
-         json.dumps(details, default=str) if details else None, old_value, new_value))
+         json.dumps(sanitized, default=str) if sanitized else None, old_value, new_value))
     cur.close()
 
 
