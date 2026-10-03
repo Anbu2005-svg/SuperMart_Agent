@@ -8,7 +8,8 @@ from openai import OpenAI
 from skills import (
     inventory, billing, credit, analytics, documents, preferences, audit,
     notifications, gst_export, returns, barcode, upi, expiry, whatsapp, voice,
-    customer_history, shop_manager, purchase_orders, feedback, roles, installments, eod_report
+    customer_history, shop_manager, purchase_orders, feedback, roles, installments, eod_report,
+    supplier_ledger, price_tracker, catalog_bulk, abc_analysis, cross_sell, digital_catalog, stock_reconcile
 )
 
 logger = logging.getLogger(__name__)
@@ -237,7 +238,26 @@ TOOL_DISPATCH: Dict[str, Callable] = {
     "record_installment_payment": installments.record_installment_payment,
     "list_active_installments": installments.list_active_installments,
     "generate_installment_reminder_link": installments.generate_installment_reminder_link,
-    "generate_end_of_day_report": eod_report.generate_end_of_day_report
+    "generate_end_of_day_report": eod_report.generate_end_of_day_report,
+    # ── Tier 3 & Tier 4 Intelligence Suite ──
+    "add_supplier": supplier_ledger.add_supplier,
+    "list_suppliers": supplier_ledger.list_suppliers,
+    "record_supplier_bill": supplier_ledger.record_supplier_bill,
+    "record_supplier_payment": supplier_ledger.record_supplier_payment,
+    "get_supplier_ledger": supplier_ledger.get_supplier_ledger,
+    "get_pending_payables": supplier_ledger.get_pending_payables,
+    "log_price_change": price_tracker.log_price_change,
+    "check_price_inflation": price_tracker.check_price_inflation,
+    "get_product_price_history": price_tracker.get_product_price_history,
+    "export_catalog_csv": catalog_bulk.export_catalog_csv,
+    "import_catalog_csv": catalog_bulk.import_catalog_csv,
+    "compute_abc_classification": abc_analysis.compute_abc_classification,
+    "get_cross_sell_suggestions": cross_sell.get_cross_sell_suggestions,
+    "get_top_market_baskets": cross_sell.get_top_market_baskets,
+    "generate_digital_catalog": digital_catalog.generate_digital_catalog,
+    "export_html_catalog": digital_catalog.export_html_catalog,
+    "audit_physical_stock": stock_reconcile.audit_physical_stock,
+    "apply_stock_reconciliation": stock_reconcile.apply_stock_reconciliation
 }
 
 # OpenAI-compatible tool schemas
@@ -1204,5 +1224,279 @@ TOOLS_SCHEMA = [
                 }
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_supplier",
+            "description": "Register a new goods supplier or wholesale distributor with phone, GSTIN, and company name.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Supplier contact or person name"},
+                    "phone": {"type": "string", "description": "Phone or mobile number"},
+                    "gstin": {"type": "string", "description": "Supplier GSTIN number"},
+                    "company_name": {"type": "string", "description": "Distributor/enterprise name"},
+                    "address": {"type": "string", "description": "Office or warehouse address"}
+                },
+                "required": ["name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_suppliers",
+            "description": "List all registered suppliers with their total billed, total paid, and net balance payable.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "record_supplier_bill",
+            "description": "Record an incoming inventory purchase invoice/bill received from a supplier.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "supplier": {"type": "string", "description": "Supplier name or supplier ID"},
+                    "total_amount": {"type": "number", "description": "Total invoice bill amount in INR"},
+                    "vendor_bill_no": {"type": "string", "description": "Vendor invoice number"},
+                    "due_date": {"type": "string", "description": "Payment due date in YYYY-MM-DD format"},
+                    "notes": {"type": "string", "description": "Invoice notes or product remarks"}
+                },
+                "required": ["supplier", "total_amount"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "record_supplier_payment",
+            "description": "Record a payment disbursed to a supplier via Cash, UPI, Bank Transfer, or Cheque.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "supplier": {"type": "string", "description": "Supplier name or supplier ID"},
+                    "amount": {"type": "number", "description": "Amount paid in INR"},
+                    "payment_mode": {"type": "string", "description": "cash, upi, bank_transfer, or cheque"},
+                    "reference_no": {"type": "string", "description": "Transaction reference or cheque number"},
+                    "bill_id": {"type": "integer", "description": "Optional specific supplier bill ID being settled"},
+                    "notes": {"type": "string", "description": "Payment remarks"}
+                },
+                "required": ["supplier", "amount"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_supplier_ledger",
+            "description": "Fetch complete vendor ledger containing bills, payments, and net balance due for a supplier.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "supplier": {"type": "string", "description": "Supplier name or supplier ID"}
+                },
+                "required": ["supplier"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_pending_payables",
+            "description": "View all outstanding accounts payable owed to suppliers, split by overdue and upcoming deadlines.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "log_price_change",
+            "description": "Update product cost or selling price and log changes to price history audit log.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sku_id": {"type": "string", "description": "Product SKU ID"},
+                    "new_cost_price": {"type": "number", "description": "New purchase cost price"},
+                    "new_selling_price": {"type": "number", "description": "New retail selling price"},
+                    "source": {"type": "string", "description": "Reason or source (e.g. manual, vendor_hike, clearance)"}
+                },
+                "required": ["sku_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_price_inflation",
+            "description": "Scan inventory for wholesale cost price hikes over past N days and flag shrinking profit margins.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days": {"type": "integer", "description": "Lookback period in days (default 90)"},
+                    "target_margin_pct": {"type": "number", "description": "Target supermarket margin percentage (default 20.0)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_product_price_history",
+            "description": "View chronological price change history for a product.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sku_or_name": {"type": "string", "description": "Product name or SKU ID"}
+                },
+                "required": ["sku_or_name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "export_catalog_csv",
+            "description": "Export the store inventory catalog into CSV format.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Optional file path to save CSV"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "import_catalog_csv",
+            "description": "Bulk import or update inventory products from CSV content.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "csv_content": {"type": "string", "description": "Raw CSV string data"},
+                    "file_path": {"type": "string", "description": "File path to CSV file on disk"},
+                    "mode": {"type": "string", "description": "'upsert' to overwrite or 'add_stock' to increment stock"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "compute_abc_classification",
+            "description": "Classify inventory into Class A (top 80% revenue), Class B (15%), and Class C (5% / dead stock).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days": {"type": "integer", "description": "Sales analysis window in days (default 60)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_cross_sell_suggestions",
+            "description": "Recommend complementary items frequently bought together with the given products.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "items": {"type": "string", "description": "Product name(s) or SKU(s) separated by commas"},
+                    "top_n": {"type": "integer", "description": "Number of recommendations to return (default 5)"}
+                },
+                "required": ["items"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_top_market_baskets",
+            "description": "Find top product pairs most frequently purchased together in the supermarket.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "top_n": {"type": "integer", "description": "Number of top pairs to return (default 10)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_digital_catalog",
+            "description": "Generate digital store catalog grouped by category with live prices and stock availability.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string", "description": "Optional category filter"},
+                    "in_stock_only": {"type": "boolean", "description": "Only return in-stock items (default true)"},
+                    "search_query": {"type": "string", "description": "Optional search term"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "export_html_catalog",
+            "description": "Export a responsive standalone HTML catalog file with instant search and WhatsApp order links.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Destination HTML path (default data/store_catalog.html)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "audit_physical_stock",
+            "description": "Parse voice transcript or text stock counts and calculate inventory variance & financial loss/gain.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "counts_input": {"type": "string", "description": "Spoken or written count note (e.g. '12 Atta, 5 Sunlite oil')"}
+                },
+                "required": ["counts_input"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "apply_stock_reconciliation",
+            "description": "Synchronize system inventory quantities to match audited physical counts.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reconciled_items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "sku_id": {"type": "string"},
+                                "physical_count": {"type": "number"}
+                            },
+                            "required": ["sku_id", "physical_count"]
+                        },
+                        "description": "List of objects with sku_id and physical_count"
+                    },
+                    "reason": {"type": "string", "description": "Audit reason note"}
+                },
+                "required": ["reconciled_items"]
+            }
+        }
     }
 ]
+

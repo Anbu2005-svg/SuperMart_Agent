@@ -486,6 +486,119 @@ async def shop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         res = list_shops()
     await update.message.reply_text(res.get("message", "No shop info."), parse_mode="Markdown")
 
+async def suppliers_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /suppliers command — view supplier ledger and pending accounts payable."""
+    telegram_id = str(update.effective_user.id) if update.effective_user else "default"
+    if not get_user_session(telegram_id):
+        await update.message.reply_text("🔐 Authentication required. Send /start to log into your shop.", parse_mode="Markdown")
+        return
+    from skills.supplier_ledger import list_suppliers, get_pending_payables
+    supp_res = list_suppliers()
+    pay_res = get_pending_payables()
+    lines = ["🏭 **SUPPLIER DIRECTORY & VENDOR KHATA**", "━━━━━━━━━━━━━━━━━━━━"]
+    lines.append(f"• Total Registered Suppliers: {supp_res.get('count', 0)}")
+    lines.append(f"• Total Pending Accounts Payable: ₹{pay_res.get('total_pending_payables', 0):.2f}\n")
+    if pay_res.get("overdue_bills"):
+        lines.append(f"⚠️ *Overdue Vendor Payments:* ({len(pay_res['overdue_bills'])})")
+        for ov in pay_res["overdue_bills"][:3]:
+            lines.append(f"• {ov['supplier_name']} — ₹{ov['pending_amount']} (Overdue {ov.get('days_overdue', 0)} days)")
+        lines.append("")
+    if supp_res.get("suppliers"):
+        lines.append("📋 *Suppliers:*")
+        for s in supp_res["suppliers"][:5]:
+            lines.append(f"• **{s['name']}** ({s['company_name']}) — Due: ₹{s['balance_payable']}")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+async def inflation_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /inflation command — check cost inflation and margin shrinkage."""
+    telegram_id = str(update.effective_user.id) if update.effective_user else "default"
+    if not get_user_session(telegram_id):
+        await update.message.reply_text("🔐 Authentication required. Send /start to log into your shop.", parse_mode="Markdown")
+        return
+    from skills.price_tracker import check_price_inflation
+    res = check_price_inflation()
+    lines = ["📈 **COST INFLATION & MARGIN AUDIT**", "━━━━━━━━━━━━━━━━━━━━"]
+    lines.append(f"• Products with Cost Increases: {res.get('inflated_products_count', 0)}")
+    lines.append(f"• Margin Compressed Items: {res.get('margin_compressed_count', 0)}\n")
+    if res.get("items"):
+        for it in res["items"][:5]:
+            warn = "⚠️" if it["margin_compressed"] else "🔹"
+            lines.append(f"{warn} **{it['name']}**")
+            lines.append(f"  Cost: ₹{it['initial_cost_price']} ➔ ₹{it['current_cost_price']} (+{it['cost_inflation_pct']}%)")
+            lines.append(f"  Margin: {it['current_margin_pct']}% (Target: {it['target_margin_pct']}%)")
+            lines.append(f"  Recommended Selling Price: ₹{it['recommended_selling_price']}\n")
+    else:
+        lines.append("✅ No significant cost inflation detected in the past 90 days.")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+async def catalog_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /catalog command — generate digital catalog & mobile HTML viewer."""
+    telegram_id = str(update.effective_user.id) if update.effective_user else "default"
+    if not get_user_session(telegram_id):
+        await update.message.reply_text("🔐 Authentication required. Send /start to log into your shop.", parse_mode="Markdown")
+        return
+    from skills.digital_catalog import generate_digital_catalog, export_html_catalog
+    res = generate_digital_catalog()
+    msg = res.get("formatted_message", "No catalog data.")
+    if len(msg) > 3500:
+        msg = msg[:3500] + "\n\n... (More items available in exported catalog file)"
+    await update.message.reply_text(msg, parse_mode="Markdown")
+    html_res = export_html_catalog()
+    if html_res.get("file_path") and os.path.exists(html_res["file_path"]):
+        with open(html_res["file_path"], "rb") as doc:
+            await update.message.reply_document(document=doc, filename="SuperMart_Catalog.html", caption="🌐 Standalone Mobile HTML Catalog with Instant Search")
+
+async def abc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /abc command — ABC inventory revenue classification."""
+    telegram_id = str(update.effective_user.id) if update.effective_user else "default"
+    if not get_user_session(telegram_id):
+        await update.message.reply_text("🔐 Authentication required. Send /start to log into your shop.", parse_mode="Markdown")
+        return
+    from skills.abc_analysis import compute_abc_classification
+    res = compute_abc_classification()
+    if res.get("status") != "success":
+        await update.message.reply_text(res.get("message", "Could not calculate ABC classification."), parse_mode="Markdown")
+        return
+    lines = ["📊 **ABC INVENTORY CLASSIFICATION**", "━━━━━━━━━━━━━━━━━━━━"]
+    lines.append(f"• Total Evaluated Products: {res.get('total_products_evaluated', 0)}")
+    lines.append(f"• Total Period Revenue: ₹{res.get('total_period_revenue', 0):.2f}\n")
+    ca = res.get("class_a", {})
+    cb = res.get("class_b", {})
+    cc = res.get("class_c", {})
+    lines.append(f"🟢 **Class A (Top 80% Revenue):** {ca.get('count', 0)} items (₹{ca.get('total_revenue', 0):.2f})")
+    lines.append(f"🟡 **Class B (Next 15% Revenue):** {cb.get('count', 0)} items (₹{cb.get('total_revenue', 0):.2f})")
+    lines.append(f"🔴 **Class C (Bottom 5% / Slow):** {cc.get('count', 0)} items (₹{cc.get('total_revenue', 0):.2f})\n")
+    lines.append("💡 *Class A items drive 80% of sales — prioritize stock availability!*")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+async def crosssell_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /crosssell [item] command — market basket cross-sell suggestions."""
+    telegram_id = str(update.effective_user.id) if update.effective_user else "default"
+    if not get_user_session(telegram_id):
+        await update.message.reply_text("🔐 Authentication required. Send /start to log into your shop.", parse_mode="Markdown")
+        return
+    from skills.cross_sell import get_cross_sell_suggestions, get_top_market_baskets
+    if context.args:
+        item = " ".join(context.args).strip()
+        res = get_cross_sell_suggestions(item)
+        lines = [f"🛒 **CROSS-SELL SUGGESTIONS FOR '{item}'**", "━━━━━━━━━━━━━━━━━━━━"]
+        if res.get("suggestions"):
+            for s in res["suggestions"]:
+                lines.append(f"• **{s['name']}** (₹{s['selling_price']:.2f})")
+                lines.append(f"  Reason: {s['reason']}")
+        else:
+            lines.append("No specific co-purchased items found yet.")
+    else:
+        res = get_top_market_baskets()
+        lines = ["🛒 **TOP MARKET BASKETS (FREQUENTLY PAIRED)**", "━━━━━━━━━━━━━━━━━━━━"]
+        if res.get("top_pairs"):
+            for p in res["top_pairs"][:7]:
+                lines.append(f"• {p['item_a']} + {p['item_b']} ({p['pair_frequency']} orders)")
+        else:
+            lines.append("More finalized bills needed to compute market baskets.")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
 async def handle_voice_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handle voice notes and audio clips: transcribe using Groq Whisper AI in real-time
@@ -1092,6 +1205,11 @@ async def post_init(application):
         BotCommand("health", "0-100 Supermarket Business Health Score"),
         BotCommand("eod", "End-of-day executive closing summary"),
         BotCommand("shop", "Multi-shop manager & branch switcher"),
+        BotCommand("suppliers", "Supplier directory & vendor payables"),
+        BotCommand("inflation", "Cost inflation & margin shrinkage audit"),
+        BotCommand("catalog", "View & download digital HTML store catalog"),
+        BotCommand("abc", "ABC inventory revenue classification"),
+        BotCommand("crosssell", "Frequently bought together recommendations"),
         BotCommand("khata", "View customer credit balances"),
         BotCommand("summary", "View today's sales & revenue summary"),
         BotCommand("invoice", "Download PDF GST Tax Invoice"),
@@ -1483,6 +1601,11 @@ def main():
     app.add_handler(CommandHandler("health", health_command))
     app.add_handler(CommandHandler("eod", eod_command))
     app.add_handler(CommandHandler("shop", shop_command))
+    app.add_handler(CommandHandler("suppliers", suppliers_command))
+    app.add_handler(CommandHandler("inflation", inflation_command))
+    app.add_handler(CommandHandler("catalog", catalog_command))
+    app.add_handler(CommandHandler("abc", abc_command))
+    app.add_handler(CommandHandler("crosssell", crosssell_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CallbackQueryHandler(button_callback_handler))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice_note))

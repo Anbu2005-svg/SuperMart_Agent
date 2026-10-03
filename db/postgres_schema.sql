@@ -327,4 +327,63 @@ CREATE TABLE IF NOT EXISTS user_roles (
 
 CREATE INDEX IF NOT EXISTS idx_user_roles_role ON user_roles(role);
 
+-- ══════════════════════════════════════════════════════════════════
+-- TIER 3 & TIER 4 EXTENSIONS
+-- ══════════════════════════════════════════════════════════════════
+
+-- Feature 09: Supplier Ledger & Accounts Payable (Vendor Khata)
+CREATE TABLE IF NOT EXISTS suppliers (
+    supplier_id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    phone VARCHAR(50) NULL,
+    gstin VARCHAR(50) NULL,
+    company_name VARCHAR(255) NULL,
+    address TEXT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_suppliers_name ON suppliers(name);
+
+CREATE TABLE IF NOT EXISTS supplier_bills (
+    bill_id SERIAL PRIMARY KEY,
+    supplier_id INTEGER NOT NULL REFERENCES suppliers(supplier_id) ON DELETE CASCADE,
+    vendor_bill_no VARCHAR(100) NULL,
+    total_amount DOUBLE PRECISION NOT NULL,
+    paid_amount DOUBLE PRECISION DEFAULT 0,
+    due_date DATE NULL,
+    status VARCHAR(50) DEFAULT 'unpaid', -- unpaid, partially_paid, paid
+    notes TEXT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_supplier_bills_supplier ON supplier_bills(supplier_id);
+CREATE INDEX IF NOT EXISTS idx_supplier_bills_status ON supplier_bills(status);
+
+CREATE TABLE IF NOT EXISTS supplier_payments (
+    payment_id SERIAL PRIMARY KEY,
+    supplier_id INTEGER NOT NULL REFERENCES suppliers(supplier_id) ON DELETE CASCADE,
+    bill_id INTEGER NULL REFERENCES supplier_bills(bill_id) ON DELETE SET NULL,
+    amount DOUBLE PRECISION NOT NULL,
+    payment_mode VARCHAR(50) DEFAULT 'cash',
+    reference_no VARCHAR(100) NULL,
+    notes TEXT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_supplier_payments_supplier ON supplier_payments(supplier_id);
+
+-- Feature 10: Price & Cost History Tracker
+CREATE TABLE IF NOT EXISTS price_history (
+    id SERIAL PRIMARY KEY,
+    sku_id VARCHAR(255) NOT NULL REFERENCES products(sku_id) ON DELETE CASCADE,
+    old_cost_price DOUBLE PRECISION NULL,
+    new_cost_price DOUBLE PRECISION NULL,
+    old_selling_price DOUBLE PRECISION NULL,
+    new_selling_price DOUBLE PRECISION NULL,
+    source VARCHAR(50) DEFAULT 'manual',
+    recorded_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_price_history_sku ON price_history(sku_id);
+
 
