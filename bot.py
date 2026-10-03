@@ -238,11 +238,22 @@ async def invoice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if res.get("status") == "success" and "file_path" in res:
         file_path = res["file_path"]
         if is_safe_generated_file(file_path):
+            buttons = []
+            try:
+                from skills.whatsapp import generate_whatsapp_bill_link
+                wa_res = generate_whatsapp_bill_link(bill_id)
+                if wa_res.get("status") == "success" and wa_res.get("whatsapp_url"):
+                    buttons.append([InlineKeyboardButton("💬 Share on WhatsApp", url=wa_res["whatsapp_url"])])
+            except Exception:
+                pass
+
+            reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
             with open(file_path, "rb") as doc:
                 await update.message.reply_document(
                     document=doc,
                     filename=os.path.basename(file_path),
-                    caption=f"Tax Invoice for Bill {bill_id}"
+                    caption=f"Tax Invoice for Bill {bill_id} (with embedded UPI QR Code)",
+                    reply_markup=reply_markup
                 )
             return
     await update.message.reply_text(f"❌ Failed to generate PDF invoice: {res.get('message', 'Unknown error')}")
@@ -270,47 +281,109 @@ async def analysis_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
     await update.message.reply_text(f"❌ Failed to generate analysis deck: {res.get('message', 'Unknown error')}")
 
+async def upi_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /upi <bill_id or amount> command — generates dynamic UPI QR code with GPay/PhonePe/Paytm link."""
+    telegram_id = str(update.effective_user.id) if update.effective_user else "default"
+    session = get_user_session(telegram_id)
+    if not session:
+        await update.message.reply_text("🔐 Authentication required. Send /start to log into your shop.", parse_mode="Markdown")
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "📱 **Dynamic UPI QR Code Generator**\n\n"
+            "• **Generate for a bill:** `/upi <bill_id>` (e.g. `/upi BILL-804AE9F8`)\n"
+            "• **Generate for an amount:** `/upi <amount>` (e.g. `/upi 250` or `/upi 49.50`)\n\n"
+            "⚡ Generates instant GPay, PhonePe, Paytm, and BHIM scannable payment QR code!",
+            parse_mode="Markdown"
+        )
+        return
+
+    arg = context.args[0].strip()
+    from skills.upi import generate_upi_qr_for_bill, generate_upi_qr_code
+
+    if arg.upper().startswith("BILL-"):
+        res = generate_upi_qr_for_bill(arg)
+    else:
+        try:
+            amt = float(arg.replace("₹", "").replace(",", ""))
+            note = " ".join(context.args[1:]) if len(context.args) > 1 else "Supermarket Payment"
+            res = generate_upi_qr_code(amount=amt, note=note)
+        except ValueError:
+            res = generate_upi_qr_for_bill(arg)
+
+    if res.get("status") == "success" and "file_path" in res:
+        qr_file = res["file_path"]
+        if os.path.exists(qr_file):
+            caption = (
+                f"📱 **Dynamic UPI Payment QR**\n\n"
+                f"• **Amount:** ₹{res['amount']:.2f}\n"
+                f"• **Payee VPA:** `{res['vpa']}`\n"
+                f"• **Merchant:** {res['merchant_name']}\n\n"
+                f"⚡ Scan with Google Pay, PhonePe, Paytm, or BHIM to pay instantly!"
+            )
+            with open(qr_file, "rb") as photo:
+                await update.message.reply_photo(
+                    photo=photo,
+                    caption=caption,
+                    parse_mode="Markdown"
+                )
+            return
+
+    await update.message.reply_text(f"❌ Failed to generate UPI QR: {res.get('message', 'Unknown error')}")
+
+async def expiry_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /expiry [days] command — smart expiry alerts & dynamic clearance markdowns."""
+    telegram_id = str(update.effective_user.id) if update.effective_user else "default"
+    session = get_user_session(telegram_id)
+    if not session:
+        await update.message.reply_text("🔐 Authentication required. Send /start to log into your shop.", parse_mode="Markdown")
+        return
+
+    days_ahead = 15
+    if context.args:
+        try:
+            days_ahead = max(1, min(90, int(context.args[0].strip())))
+        except ValueError:
+            pass
+
+    from skills.expiry import recommend_markdown_discounts
+    res = recommend_markdown_discounts(days_ahead=days_ahead)
+
+    buttons = []
+    for item in res.get("recommendations", [])[:5]:
+        if item["days_left"] > 0:
+            btn_text = f"⚡ Apply {item['discount_pct']:.0f}% Off ({item['product_name'][:14]})"
+            cb_data = f"md_disc:{item['sku_id']}:{int(item['discount_pct'])}"
+            buttons.append([InlineKeyboardButton(btn_text, callback_data=cb_data)])
+
+    reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
+    await update.message.reply_text(res.get("message", "No expiry data."), parse_mode="Markdown", reply_markup=reply_markup)
+
 async def handle_voice_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Handle voice notes: transcribe (if Whisper or OpenAI API is configured) and
-    route the transcript through the agent as a normal text message.
-    Supports VOICE_TRANSCRIBE_API_KEY or standard OPENAI_API_KEY.
+    Handle voice notes and audio clips: transcribe using Groq Whisper AI in real-time
+    and route the transcript through the agent for multilingual voice note billing.
+    Supports English, Tamil, Hindi, Hinglish, Tanglish.
     """
-    if not update.message or not update.message.voice:
+    if not update.message or not (update.message.voice or update.message.audio):
         return
 
     telegram_id = str(update.effective_user.id) if update.effective_user else "default"
     session = get_user_session(telegram_id)
     if not session:
-        await update.message.reply_text("🔐 Authentication required. Send /start to log into your shop.")
+        await update.message.reply_text("🔐 Authentication required. Send /start to log into your shop.", parse_mode="Markdown")
         return
 
-    # Auto-detect Whisper provider: GROQ_API_KEY (100% Free), VOICE_TRANSCRIBE_API_KEY, or OPENAI_API_KEY
+    # Check for Groq or Whisper API key
     groq_key = os.getenv("GROQ_API_KEY", "").strip()
     voice_key = os.getenv("VOICE_TRANSCRIBE_API_KEY", "").strip()
     openai_key = os.getenv("OPENAI_API_KEY", "").strip()
 
-    if groq_key:
-        api_key = groq_key
-        base_url = os.getenv("VOICE_TRANSCRIBE_BASE_URL", "").strip() or "https://api.groq.com/openai/v1"
-        model = os.getenv("VOICE_TRANSCRIBE_MODEL", "whisper-large-v3-turbo")
-    elif voice_key:
-        api_key = voice_key
-        base_url = os.getenv("VOICE_TRANSCRIBE_BASE_URL", "").strip() or "https://api.openai.com/v1"
-        model = os.getenv("VOICE_TRANSCRIBE_MODEL", "whisper-1")
-    elif openai_key:
-        api_key = openai_key
-        base_url = os.getenv("VOICE_TRANSCRIBE_BASE_URL", "").strip() or "https://api.openai.com/v1"
-        model = os.getenv("VOICE_TRANSCRIBE_MODEL", "whisper-1")
-    else:
-        api_key = ""
-        base_url = ""
-        model = ""
-
-    if not (api_key and base_url):
+    if not (groq_key or voice_key or openai_key):
         await update.message.reply_text(
             "🎙️ **Voice note received!**\n\n"
-            "To enable free voice notes:\n"
+            "To enable free voice billing:\n"
             "1. Create a 100% free key at [console.groq.com](https://console.groq.com) (no credit card required).\n"
             "2. Add `GROQ_API_KEY=gsk_...` into your `.env` file.\n\n"
             "For now, please type your message as text! 🛒",
@@ -318,56 +391,38 @@ async def handle_voice_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    waiting = await update.message.reply_text("🎤 Transcribing your voice note...")
+    waiting = await update.message.reply_text("🎤 Transcribing your voice message (Groq Whisper AI)...")
 
-    transcript = None
     try:
-        import httpx
+        audio_target = update.message.voice or update.message.audio
+        is_voice = bool(update.message.voice)
+        filename = "voice.ogg" if is_voice else getattr(audio_target, "file_name", "voice.mp3")
 
-        voice_file = await context.bot.get_file(update.message.voice.file_id)
-        ogg_bytes = await voice_file.download_as_bytearray()
+        voice_file = await context.bot.get_file(audio_target.file_id)
+        raw_bytes = await voice_file.download_as_bytearray()
 
-        async def _transcribe():
-            async with httpx.AsyncClient(timeout=45) as client:
-                files = {"file": ("voice.ogg", bytes(ogg_bytes), "audio/ogg")}
-                # Guide Whisper specifically for English, Tamil, and Hindi Kirana supermarket terminology
-                data = {
-                    "model": model,
-                    "prompt": (
-                        "Kirana supermarket store operations and billing in English, Tamil (தமிழ், Tanglish), "
-                        "and Hindi (हिंदी, Hinglish). Terms: Maggi, Atta, Sugar, Dal, Rice, Salt, Oil, Milk, "
-                        "kg, g, litre, ml, packet, piece, MRP, GST, bill, cash, UPI, card, khata, "
-                        "ரூபாய், கிலோ, பாக்கெட், பில், அரிசி, சர்க்கரை, பருப்பு, எண்ணெய், பால், "
-                        "रुपये, किलो, पैकेट, बिल, आटा, चीनी, दाल, तेल, दूध."
-                    )
-                }
-                resp = await client.post(
-                    f"{base_url.rstrip('/')}/audio/transcriptions",
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    files=files,
-                    data=data,
-                )
-                resp.raise_for_status()
-                return resp.json().get("text")
+        from skills.voice import transcribe_audio
+        res = await asyncio.to_thread(transcribe_audio, bytes(raw_bytes), filename)
 
-        transcript = await asyncio.wait_for(_transcribe(), timeout=45)
+        if res.get("status") == "success" and res.get("transcript"):
+            transcript = res["transcript"]
+            await waiting.edit_text(f"🎧 Transcribed ({res.get('provider', 'Groq')}): \"{transcript}\" — processing...")
+            await handle_message(update, context, user_text_override=transcript)
+            return
+        elif res.get("status") == "empty":
+            await waiting.edit_text("⚠️ Voice message was empty or no speech was detected. Please try speaking again or send text.")
+            return
+        else:
+            await waiting.edit_text(f"⚠️ Voice transcription error: {res.get('message', 'Please type your request as text.')}")
+            return
     except asyncio.TimeoutError:
-        logger.warning("Voice transcription timed out after 45s.")
+        logger.warning("Voice transcription timed out.")
         await waiting.edit_text("⏱️ Voice transcription timed out. Please send your request as text.")
         return
     except Exception as e:
-        logger.warning(f"Voice transcription failed: {e}")
+        logger.warning(f"Voice handling exception: {e}")
         await waiting.edit_text("⚠️ Couldn't transcribe the voice note. Please type your request as text.")
         return
-
-    if not transcript or not transcript.strip():
-        await waiting.edit_text(
-            "⚠️ Voice note was empty or could not be transcribed. Please type your request as text."
-        )
-        return
-
-    await waiting.edit_text(f"🎧 Transcribed: \"{transcript.strip()}\" — processing...")
-    await handle_message(update, context, user_text_override=transcript.strip())
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text_override: Optional[str] = None):
@@ -588,11 +643,20 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "🤖 *Supermarket Ops Agent — Available Commands*\n\n"
         "• `/start` — Start bot session & verify mobile contact\n"
-        "• `/new` — Reset conversation context (standing preferences persist)\n"
-        "• `/invoice <bill_id>` — Download official PDF GST Tax Invoice\n"
+        "• `/barcode <number>` — Scan photo or enter barcode\n"
+        "• `/stock` — View inventory products, quantities & MRPs\n"
+        "• `/lowstock` — View low stock items at or below reorder level\n"
+        "• `/bill <items>` — Create draft bill (e.g. `/bill 2 sugar, 4 maggi, UPI`)\n"
+        "• `/upi <bill_id | amount>` — Dynamic UPI QR code (GPay/PhonePe/Paytm/BHIM)\n"
+        "• `/expiry [days]` — Smart expiry tracking & clearance markdown engine\n"
+        "• `/khata [customer]` — View customer credit ledgers & WhatsApp reminders\n"
+        "• `/summary` — View today's sales & revenue breakdown\n"
+        "• `/invoice <bill_id>` — Download official PDF GST Tax Invoice with embedded UPI QR\n"
         "• `/analysis <period>` — Download PowerPoint (.pptx) operations sales deck\n"
-        "• `/help` — Show this interactive command guide\n"
-        "• `/logout` — De-authenticate user session\n\n"
+        "• `/new` — Reset conversation context (standing preferences persist)\n"
+        "• `/logout` — De-authenticate user session\n"
+        "• `/help` — Show this interactive command guide\n\n"
+        "🎙️ *Voice Note Billing:* Send a Telegram voice note in **Tamil, Hindi, or English** (e.g. _'2 packet Maggi bill pannunga'_ or _'1kg sugar Ramesh khata me dalo'_)\n\n"
         "💬 *You can also ask anything in plain text:* e.g. \"Show stock\", \"Start a bill\", \"Charge khata ₹500 to Ravi\", \"Show today's sales summary\""
     )
     await update.message.reply_text(help_text, parse_mode="Markdown")
@@ -680,6 +744,16 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 f"• **Cost:** ₹{p['cost_price']} | **MRP:** ₹{p['mrp']}",
                 parse_mode="Markdown"
             )
+    elif query.data.startswith("md_disc:"):
+        parts = query.data.split(":", 2)
+        sku = parts[1]
+        disc_pct = float(parts[2])
+        from skills.expiry import apply_clearance_discount
+        res = apply_clearance_discount(sku, disc_pct)
+        if res.get("status") == "success":
+            await query.edit_message_text(res["message"], parse_mode="Markdown")
+        else:
+            await query.edit_message_text(f"❌ {res.get('message', 'Failed to apply clearance discount')}")
 
 async def stock_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /stock command."""
@@ -870,6 +944,8 @@ async def post_init(application):
         BotCommand("stock", "View all products & inventory stock"),
         BotCommand("lowstock", "View low stock reorder items"),
         BotCommand("bill", "Create a bill (e.g. /bill 2 sugar, UPI)"),
+        BotCommand("upi", "Dynamic UPI QR code (e.g. /upi 250)"),
+        BotCommand("expiry", "Smart expiry alerts & clearance discounts"),
         BotCommand("khata", "View customer credit balances"),
         BotCommand("summary", "View today's sales & revenue summary"),
         BotCommand("invoice", "Download PDF GST Tax Invoice"),
@@ -1236,9 +1312,11 @@ def main():
     app.add_handler(CommandHandler("barcode", barcode_command))
     app.add_handler(CommandHandler("invoice", invoice_command))
     app.add_handler(CommandHandler("analysis", analysis_command))
+    app.add_handler(CommandHandler("upi", upi_command))
+    app.add_handler(CommandHandler("expiry", expiry_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CallbackQueryHandler(button_callback_handler))
-    app.add_handler(MessageHandler(filters.VOICE, handle_voice_note))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice_note))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.CONTACT | (filters.TEXT & ~filters.COMMAND), handle_message))
 

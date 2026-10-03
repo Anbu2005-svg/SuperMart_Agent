@@ -603,6 +603,27 @@ def finalize_bill(
 
         final_preview = preview_bill(bill_id)
         final_preview["message"] = f"Bill {bill_id} finalized successfully! Invoice #{next_invoice_number}. Total: ₹{grand_total} ({payment_mode.upper()})."
+
+        # Auto-generate dynamic UPI QR code when payment mode is UPI
+        if payment_mode == "upi" and grand_total > 0:
+            try:
+                from skills.upi import generate_upi_qr_code
+                upi_res = generate_upi_qr_code(amount=grand_total, bill_id=bill_id)
+                if upi_res.get("status") == "success":
+                    final_preview["upi_qr"] = upi_res["upi_uri"]
+                    final_preview["file_path"] = upi_res["file_path"]
+            except Exception:
+                pass
+
+        # Generate WhatsApp digital receipt link
+        try:
+            from skills.whatsapp import generate_whatsapp_bill_link
+            wa_res = generate_whatsapp_bill_link(bill_id)
+            if wa_res.get("status") == "success":
+                final_preview["whatsapp_url"] = wa_res["whatsapp_url"]
+        except Exception:
+            pass
+
         if low_stock_alerts:
             alert_items_str = ", ".join([f"{item['name']} ({item['current_qty']} {item['unit']} left)" for item in low_stock_alerts])
             final_preview["low_stock_warning"] = (

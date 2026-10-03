@@ -5,7 +5,7 @@ import logging
 from typing import Dict, Any, List, Callable
 from openai import OpenAI
 
-from skills import inventory, billing, credit, analytics, documents, preferences, audit, notifications, gst_export, returns, barcode
+from skills import inventory, billing, credit, analytics, documents, preferences, audit, notifications, gst_export, returns, barcode, upi, expiry, whatsapp, voice
 
 logger = logging.getLogger(__name__)
 
@@ -201,7 +201,13 @@ TOOL_DISPATCH: Dict[str, Callable] = {
     "list_returns": returns.list_returns,
     "generate_digital_receipt": billing.generate_digital_receipt,
     "lookup_product_by_barcode": barcode.lookup_product_by_barcode,
-    "assign_barcode_to_product": barcode.assign_barcode_to_product
+    "assign_barcode_to_product": barcode.assign_barcode_to_product,
+    "generate_upi_qr_for_bill": upi.generate_upi_qr_for_bill,
+    "generate_upi_qr_code": upi.generate_upi_qr_code,
+    "recommend_markdown_discounts": expiry.recommend_markdown_discounts,
+    "apply_clearance_discount": expiry.apply_clearance_discount,
+    "generate_whatsapp_bill_link": whatsapp.generate_whatsapp_bill_link,
+    "generate_whatsapp_khata_reminder_link": whatsapp.generate_whatsapp_khata_reminder_link
 }
 
 # OpenAI-compatible tool schemas
@@ -874,6 +880,96 @@ TOOLS_SCHEMA = [
                     "barcode": {"type": "string", "description": "The barcode string to link (e.g. '8901030383458')"}
                 },
                 "required": ["sku_id", "barcode"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_upi_qr_for_bill",
+            "description": "Generate an NPCI-compliant dynamic UPI QR Code image and payment URI for a finalized bill amount.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "bill_id": {"type": "string", "description": "Bill ID (e.g. 'BILL-7C9A41E2')"},
+                    "vpa": {"type": "string", "description": "Optional merchant UPI VPA (defaults to configured shop VPA)"}
+                },
+                "required": ["bill_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_upi_qr_code",
+            "description": "Generate an NPCI-compliant dynamic UPI QR Code image for any custom amount or payment note.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "amount": {"type": "number", "description": "The payment amount in INR (e.g. 250.0)"},
+                    "note": {"type": "string", "description": "Optional payment note or reason (e.g. 'Khata clearance')"},
+                    "bill_id": {"type": "string", "description": "Optional bill ID reference"},
+                    "vpa": {"type": "string", "description": "Optional merchant UPI VPA"}
+                },
+                "required": ["amount"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "recommend_markdown_discounts",
+            "description": "Analyze stock batches approaching shelf-life expiry (within 1-15 days or already expired) and recommend dynamic tiered markdown clearance discounts (10% to 50% off) to prevent dead stock loss.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days_ahead": {"type": "number", "description": "Window in days to scan ahead for expiring batches (default 15)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "apply_clearance_discount",
+            "description": "Apply an immediate promotional clearance discount percentage to a product's selling MRP.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sku_id": {"type": "string", "description": "The product SKU ID (e.g. 'SKU-BUTTER-100')"},
+                    "discount_pct": {"type": "number", "description": "Percentage discount to apply (e.g. 25 or 50)"}
+                },
+                "required": ["sku_id", "discount_pct"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_whatsapp_bill_link",
+            "description": "Generate an itemized digital receipt formatted for WhatsApp, along with a one-tap wa.me link to share directly with the customer.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "bill_id": {"type": "string", "description": "The bill ID (e.g. 'BILL-7C9A41E2')"},
+                    "phone": {"type": "string", "description": "Optional customer phone number (e.g. '+919876543210')"}
+                },
+                "required": ["bill_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_whatsapp_khata_reminder_link",
+            "description": "Generate a polite, professional WhatsApp Khata payment reminder with shop UPI ID and a one-tap wa.me link.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "customer_name": {"type": "string", "description": "The customer's name (e.g. 'Priya Sharma')"},
+                    "phone": {"type": "string", "description": "Optional customer phone number"}
+                },
+                "required": ["customer_name"]
             }
         }
     }

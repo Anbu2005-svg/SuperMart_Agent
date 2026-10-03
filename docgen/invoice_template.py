@@ -283,19 +283,54 @@ def generate_pdf_invoice(bill_id: str, output_dir: str = "generated_docs") -> st
     words_style = ParagraphStyle('Words', parent=cell_style, fontName='Helvetica-Oblique', fontSize=8.5)
     words_para = Paragraph(f"<b>Amount in Words:</b> {amount_to_indian_words(summary['grand_total'])}", words_style)
 
+    # Dynamic UPI QR Code for instant payment
+    upi_block = Paragraph("", cell_style)
+    try:
+        from skills.upi import generate_upi_qr_code
+        from reportlab.platypus import Image as RLImage
+        grand_total = summary.get('grand_total', 0.0)
+        if grand_total > 0:
+            upi_res = generate_upi_qr_code(amount=grand_total, bill_id=clean_bill_id, output_dir=output_dir)
+            if upi_res.get("status") == "success" and os.path.exists(upi_res["file_path"]):
+                qr_img = RLImage(upi_res["file_path"], width=56, height=56)
+                upi_text = Paragraph(
+                    f"<b>Scan &amp; Pay via UPI</b><br/>"
+                    f"<font size=7 color='#4A5568'>GPay / PhonePe / Paytm / BHIM<br/>"
+                    f"VPA: <b>{escape_xml_text(upi_res['vpa'])}</b><br/>"
+                    f"Amount: <b>₹{grand_total:.2f}</b></font>",
+                    ParagraphStyle('UPIText', parent=cell_style, fontSize=7.5, leading=9.5)
+                )
+                upi_block = Table([[qr_img, upi_text]], colWidths=[64, 256])
+                upi_block.setStyle(TableStyle([
+                    ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                    ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#F7FAFC')),
+                    ('BOX', (0, 0), (-1, -1), 0.5, colors.HexColor('#CBD5E0')),
+                    ('TOPPADDING', (0, 0), (-1, -1), 3),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+                    ('LEFTPADDING', (0, 0), (-1, -1), 4),
+                    ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+                ]))
+    except Exception:
+        pass
+
     bottom_wrapper = Table(
-        [[breakup_table, summary_table], [words_para, Paragraph("", cell_style)]],
-        colWidths=[400, 240]
+        [
+            [breakup_table, summary_table],
+            [words_para, Paragraph("", cell_style)],
+            [upi_block, Paragraph("", cell_style)]
+        ],
+        colWidths=[330, 210]
     )
     bottom_wrapper.setStyle(TableStyle([
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('TOPPADDING', (0, 1), (-1, 1), 8),
+        ('TOPPADDING', (0, 1), (-1, 1), 6),
+        ('TOPPADDING', (0, 2), (-1, 2), 6),
     ]))
     story.append(bottom_wrapper)
 
     # ── Signature block & footer ──
-    story.append(Spacer(1, 30))
-    story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor('#CBD5E0'), spaceAfter=10))
+    story.append(Spacer(1, 18))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor('#CBD5E0'), spaceAfter=8))
 
     sign_data = [
         [Paragraph("Customer's Signature", ParagraphStyle('SignL', parent=cell_style, fontSize=8.5, textColor=colors.HexColor('#718096'))),
