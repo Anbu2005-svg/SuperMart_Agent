@@ -267,3 +267,64 @@ CREATE TABLE IF NOT EXISTS returns (
 CREATE INDEX IF NOT EXISTS idx_returns_bill ON returns(bill_id);
 CREATE INDEX IF NOT EXISTS idx_returns_sku ON returns(sku_id);
 
+-- ══════════════════════════════════════════════════════════════════
+-- NEW ADVANCED ENTERPRISE SUITE TABLES
+-- ══════════════════════════════════════════════════════════════════
+
+-- Customer Feedback & Ratings
+CREATE TABLE IF NOT EXISTS customer_feedback (
+    id SERIAL PRIMARY KEY,
+    customer_id INTEGER NULL REFERENCES customers(customer_id) ON DELETE SET NULL,
+    customer_name VARCHAR(255) NULL,
+    bill_id VARCHAR(255) NULL REFERENCES bills(bill_id) ON DELETE SET NULL,
+    sku_id VARCHAR(255) NULL REFERENCES products(sku_id) ON DELETE SET NULL,
+    rating INTEGER NOT NULL CHECK (rating >= 1 AND rating <= 5),
+    feedback_text TEXT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_feedback_cust ON customer_feedback(customer_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_sku ON customer_feedback(sku_id);
+
+-- Khata Installment / EMI Plans
+CREATE TABLE IF NOT EXISTS khata_installments (
+    plan_id VARCHAR(255) PRIMARY KEY,
+    customer_id INTEGER NOT NULL REFERENCES customers(customer_id) ON DELETE CASCADE,
+    total_amount DOUBLE PRECISION NOT NULL,
+    installment_amount DOUBLE PRECISION NOT NULL,
+    num_installments INTEGER NOT NULL,
+    installments_paid INTEGER DEFAULT 0,
+    amount_paid DOUBLE PRECISION DEFAULT 0,
+    status VARCHAR(50) DEFAULT 'active',
+    due_date DATE NOT NULL,
+    frequency_days INTEGER DEFAULT 15,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_installments_cust ON khata_installments(customer_id);
+CREATE INDEX IF NOT EXISTS idx_installments_status ON khata_installments(status);
+
+-- Purchase Orders
+CREATE TABLE IF NOT EXISTS purchase_orders (
+    po_id VARCHAR(255) PRIMARY KEY,
+    supplier_name VARCHAR(255) NULL,
+    status VARCHAR(50) DEFAULT 'draft',
+    total_estimated_cost DOUBLE PRECISION DEFAULT 0,
+    items_json TEXT NOT NULL,
+    pdf_path TEXT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_po_status ON purchase_orders(status);
+
+-- Role-Based Access Control (Staff vs Owner)
+CREATE TABLE IF NOT EXISTS user_roles (
+    telegram_id VARCHAR(255) PRIMARY KEY,
+    role VARCHAR(50) NOT NULL DEFAULT 'staff',
+    assigned_by VARCHAR(255) NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_roles_role ON user_roles(role);
+
+

@@ -5,7 +5,11 @@ import logging
 from typing import Dict, Any, List, Callable
 from openai import OpenAI
 
-from skills import inventory, billing, credit, analytics, documents, preferences, audit, notifications, gst_export, returns, barcode, upi, expiry, whatsapp, voice
+from skills import (
+    inventory, billing, credit, analytics, documents, preferences, audit,
+    notifications, gst_export, returns, barcode, upi, expiry, whatsapp, voice,
+    customer_history, shop_manager, purchase_orders, feedback, roles, installments, eod_report
+)
 
 logger = logging.getLogger(__name__)
 
@@ -207,7 +211,33 @@ TOOL_DISPATCH: Dict[str, Callable] = {
     "recommend_markdown_discounts": expiry.recommend_markdown_discounts,
     "apply_clearance_discount": expiry.apply_clearance_discount,
     "generate_whatsapp_bill_link": whatsapp.generate_whatsapp_bill_link,
-    "generate_whatsapp_khata_reminder_link": whatsapp.generate_whatsapp_khata_reminder_link
+    "generate_whatsapp_khata_reminder_link": whatsapp.generate_whatsapp_khata_reminder_link,
+    # ── Advanced Enterprise Suite ──
+    "get_customer_purchase_history": customer_history.get_customer_purchase_history,
+    "get_customer_smart_suggestions": customer_history.get_customer_smart_suggestions,
+    "get_all_customer_repurchase_alerts": customer_history.get_all_customer_repurchase_alerts,
+    "daily_profit_dashboard": analytics.daily_profit_dashboard,
+    "category_sales_heatmap": analytics.category_sales_heatmap,
+    "business_health_score": analytics.business_health_score,
+    "list_shops": shop_manager.list_shops,
+    "get_active_shop": shop_manager.get_active_shop,
+    "switch_active_shop": shop_manager.switch_active_shop,
+    "create_branch_shop": shop_manager.create_branch_shop,
+    "generate_purchase_order": purchase_orders.generate_purchase_order,
+    "list_purchase_orders": purchase_orders.list_purchase_orders,
+    "export_gstr1_json": gst_export.export_gstr1_json,
+    "detect_dead_stock": inventory.detect_dead_stock,
+    "record_customer_feedback": feedback.record_customer_feedback,
+    "get_feedback_summary": feedback.get_feedback_summary,
+    "generate_feedback_request_link": feedback.generate_feedback_request_link,
+    "get_user_role": roles.get_user_role,
+    "set_user_role": roles.set_user_role,
+    "list_user_roles": roles.list_user_roles,
+    "create_installment_plan": installments.create_installment_plan,
+    "record_installment_payment": installments.record_installment_payment,
+    "list_active_installments": installments.list_active_installments,
+    "generate_installment_reminder_link": installments.generate_installment_reminder_link,
+    "generate_end_of_day_report": eod_report.generate_end_of_day_report
 }
 
 # OpenAI-compatible tool schemas
@@ -970,6 +1000,208 @@ TOOLS_SCHEMA = [
                     "phone": {"type": "string", "description": "Optional customer phone number"}
                 },
                 "required": ["customer_name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_customer_purchase_history",
+            "description": "Retrieve comprehensive purchase history, lifetime spend, average bill value, and frequently bought products for a customer.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "customer_name": {"type": "string", "description": "Customer name to query"}
+                },
+                "required": ["customer_name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_customer_smart_suggestions",
+            "description": "Calculate customer purchase cycles and identify items overdue for restock/repurchase with tailored reminder recommendations.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "customer_name": {"type": "string", "description": "Customer name to analyze"}
+                },
+                "required": ["customer_name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_all_customer_repurchase_alerts",
+            "description": "Scan store-wide customers to find who is overdue to replenish staple essentials (Atta, Rice, Oil, Dal, Sugar).",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "daily_profit_dashboard",
+            "description": "Get detailed daily profit analysis: Revenue, COGS, Gross Profit, Margin %, category profitability, and day-over-day trends.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "date_str": {"type": "string", "description": "Optional date in YYYY-MM-DD format (defaults to today)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "category_sales_heatmap",
+            "description": "Analyze category sales performance by day of week (Monday to Sunday) to discover peak sales days.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days": {"type": "integer", "description": "Number of history days to analyze (e.g. 30)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "business_health_score",
+            "description": "Calculate composite 0-100 business health score across 4 pillars: Profitability, Stock Health, Khata Cash Flow, and Sales Momentum.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_shops",
+            "description": "List all registered supermarket branch locations in the multi-shop network.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "switch_active_shop",
+            "description": "Switch the active operating supermarket context to another branch.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "telegram_id": {"type": "string", "description": "User's telegram ID"},
+                    "target_shop_name": {"type": "string", "description": "Target shop name to switch to"}
+                },
+                "required": ["telegram_id", "target_shop_name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_purchase_order",
+            "description": "Auto-calculate replenishment quantities for low-stock items, create a Purchase Order, and export a formatted PDF.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "supplier_name": {"type": "string", "description": "Optional supplier/distributor name"},
+                    "cover_days": {"type": "integer", "description": "Target days of stock coverage (default 14)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "export_gstr1_json",
+            "description": "Generate government-compliant GSTR-1 JSON file for direct upload to the GST Offline Portal Tool.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "month": {"type": "integer", "description": "Month number (1-12)"},
+                    "year": {"type": "integer", "description": "Year (e.g. 2026)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "detect_dead_stock",
+            "description": "Find non-moving/dead stock products with zero sales in 30+ days and calculate locked working capital.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "no_sales_days": {"type": "integer", "description": "Inactivity threshold in days (default 30)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "record_customer_feedback",
+            "description": "Record a customer rating (1-5 stars) and optional feedback comments.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "customer_name": {"type": "string", "description": "Customer name"},
+                    "rating": {"type": "integer", "description": "Rating from 1 to 5 stars"},
+                    "feedback_text": {"type": "string", "description": "Optional customer comments"}
+                },
+                "required": ["customer_name", "rating"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_feedback_summary",
+            "description": "Get store customer satisfaction summary, average star rating, and recent feedback comments.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days": {"type": "integer", "description": "History days to analyze (default 30)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_installment_plan",
+            "description": "Create a structured EMI / installment repayment plan for a customer.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "customer_name": {"type": "string", "description": "Customer name"},
+                    "total_amount": {"type": "number", "description": "Total amount to be paid on EMI"},
+                    "num_installments": {"type": "integer", "description": "Number of installments (e.g. 3)"},
+                    "frequency_days": {"type": "integer", "description": "Days between installments (e.g. 15)"}
+                },
+                "required": ["customer_name", "total_amount"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_end_of_day_report",
+            "description": "Generate an executive end-of-day closing summary with sales, gross profit, drawer cash, UPI, and low stock.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "date_str": {"type": "string", "description": "Optional date in YYYY-MM-DD format (defaults to today)"}
+                }
             }
         }
     }

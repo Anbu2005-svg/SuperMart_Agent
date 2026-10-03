@@ -512,3 +512,381 @@ def customer_insights(days: int = 30, top_n: int = 10) -> Dict[str, Any]:
     finally:
         conn.close()
 
+
+def daily_profit_dashboard(date_str: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Dedicated daily profit dashboard:
+      - Revenue, COGS, Gross Profit, Gross Margin % for target date
+      - Category-wise margin breakdown (which categories earned the highest profits)
+      - Payment modes breakdown (Cash, UPI, Khata, Card)
+      - Trend comparisons vs yesterday and same day last week
+    """
+    if date_str:
+        try:
+            target_date = datetime.strptime(date_str.strip(), "%Y-%m-%d").date()
+        except ValueError:
+            return {"status": "error", "message": f"Invalid date format '{date_str}'. Expected YYYY-MM-DD."}
+    else:
+        target_date = date.today()
+
+    target_str = target_date.isoformat()
+    yesterday_str = (target_date - timedelta(days=1)).isoformat()
+    last_week_str = (target_date - timedelta(days=7)).isoformat()
+
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+
+        def _get_day_stats(day_val: str):
+            cur.execute("""
+                SELECT COUNT(*) as bills,
+                       COALESCE(SUM(b.subtotal), 0) as revenue,
+                       COALESCE(SUM(b.cgst + b.sgst), 0) as tax,
+                       COALESCE(SUM(b.total), 0) as total_revenue
+                FROM bills b
+                WHERE b.status = 'finalized' AND b.finalized_at::date = %s::date
+            """, (day_val,))
+            summary_row = cur.fetchone()
+
+            cur.execute("""
+                SELECT COALESCE(SUM(bi.qty * p.cost_price), 0) as cogs,
+                       COALESCE(SUM(bi.qty * (bi.unit_price - p.cost_price)), 0) as gross_profit
+                FROM bill_items bi
+                JOIN bills b ON bi.bill_id = b.bill_id
+                JOIN products p ON bi.sku_id = p.sku_id
+                WHERE b.status = 'finalized' AND b.finalized_at::date = %s::date
+            """, (day_val,))
+            cogs_row = cur.fetchone()
+
+            rev = float(summary_row["revenue"])
+            cogs = float(cogs_row["cogs"])
+            gp = float(cogs_row["gross_profit"])
+            margin = round((gp / rev) * 100, 1) if rev > 0 else 0.0
+
+            return {
+                "bills": summary_row["bills"],
+                "revenue": round(rev, 2),
+                "cogs": round(cogs, 2),
+                "gross_profit": round(gp, 2),
+                "margin_pct": margin,
+                "total_with_tax": round(float(summary_row["total_revenue"]), 2)
+            }
+
+        today_stats = _get_day_stats(target_str)
+        yesterday_stats = _get_day_stats(yesterday_str)
+        last_week_stats = _get_day_stats(last_week_str)
+
+        # Category-wise margin breakdown for the day
+        cur.execute("""
+            SELECT p.category,
+                   SUM(bi.qty * bi.unit_price) AS category_revenue,
+                   SUM(bi.qty * p.cost_price) AS category_cogs,
+                   SUM(bi.qty * (bi.unit_price - p.cost_price)) AS category_profit
+            FROM bill_items bi
+            JOIN bills b ON bi.bill_id = b.bill_id
+            JOIN products p ON bi.sku_id = p.sku_id
+            WHERE b.status = 'finalized' AND b.finalized_at::date = %s::date
+            GROUP BY p.category
+            ORDER BY category_profit DESC
+        """, (target_str,))
+        cat_rows = cur.fetchall()
+
+        # Payment modes breakdown
+        cur.execute("""
+            SELECT COALESCE(payment_mode, 'other') AS mode,
+                   COUNT(*) AS count,
+                   COALESCE(SUM(total), 0) AS total_amount
+            FROM bills
+            WHERE status = 'finalized' AND finalized_at::date = %s::date
+            GROUP BY payment_mode
+            ORDER BY total_amount DESC
+        """, (target_str,))
+        pay_rows = cur.fetchall()
+        cur.close()
+
+        categories = []
+        for c in cat_rows:
+            crev = float(c["category_revenue"])
+            cprofit = float(c["category_profit"])
+            cmargin = round((cprofit / crev) * 100, 1) if crev > 0 else 0.0
+            categories.append({
+                "category": c["category"],
+                "revenue": round(crev, 2),
+                "profit": round(cprofit, 2),
+                "margin_pct": cmargin
+            })
+
+        # Calculate deltas
+        rev_vs_yesterday = round(today_stats["revenue"] - yesterday_stats["revenue"], 2)
+        profit_vs_yesterday = round(today_stats["gross_profit"] - yesterday_stats["gross_profit"], 2)
+
+        lines = [
+            f"📊 **Daily Profit Dashboard — {target_str}**\n",
+            f"💰 **Gross Revenue:** ₹{today_stats['revenue']:,.2f} ({today_stats['bills']} bills)",
+            f"📦 **COGS (Cost):** ₹{today_stats['cogs']:,.2f}",
+            f"📈 **Net Gross Profit:** ₹{today_stats['gross_profit']:,.2f}",
+            f"📐 **Gross Margin:** {today_stats['margin_pct']}%",
+            f"\n🔄 **Comparisons:**",
+            f"  • vs Yesterday ({yesterday_str}): {'+' if profit_vs_yesterday >= 0 else ''}₹{profit_vs_yesterday:,.2f} Profit ({'+' if rev_vs_yesterday >= 0 else ''}₹{rev_vs_yesterday:,.2f} Rev)",
+            f"  • vs Last Week ({last_week_str}): ₹{last_week_stats['gross_profit']:,.2f} Profit (₹{last_week_stats['revenue']:,.2f} Rev)",
+        ]
+
+        if categories:
+            lines.append("\n🏷️ **Category Margins:**")
+            for cat in categories:
+                lines.append(f"  • {cat['category']} — ₹{cat['profit']:,.2f} profit ({cat['margin_pct']}% margin)")
+
+        if pay_rows:
+            lines.append("\n💳 **Payment Split:**")
+            for pr in pay_rows:
+                lines.append(f"  • {str(pr['mode']).upper()}: ₹{float(pr['total_amount']):,.2f} ({pr['count']} bills)")
+
+        return {
+            "status": "success",
+            "date": target_str,
+            "today": today_stats,
+            "yesterday": yesterday_stats,
+            "same_day_last_week": last_week_stats,
+            "category_margins": categories,
+            "payment_modes": [{
+                "mode": pr["mode"],
+                "count": pr["count"],
+                "total": round(float(pr["total_amount"]), 2)
+            } for pr in pay_rows],
+            "message": "\n".join(lines)
+        }
+    finally:
+        conn.close()
+
+
+def category_sales_heatmap(days: int = 30) -> Dict[str, Any]:
+    """
+    Category-wise sales heatmap across days of the week (Monday-Sunday).
+    Shows which categories peak on which days to optimize stock replenishment.
+    """
+    days = max(7, min(90, int(days)))
+    start = (date.today() - timedelta(days=days - 1)).isoformat()
+
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        # Extract day of week: 0=Sunday, 1=Monday, ... in Postgres EXTRACT(DOW FROM ...)
+        cur.execute("""
+            SELECT p.category,
+                   EXTRACT(DOW FROM b.finalized_at) AS dow_num,
+                   TO_CHAR(b.finalized_at, 'Day') AS day_name,
+                   SUM(bi.qty) AS total_qty,
+                   SUM(bi.line_total) AS total_sales
+            FROM bill_items bi
+            JOIN bills b ON bi.bill_id = b.bill_id
+            JOIN products p ON bi.sku_id = p.sku_id
+            WHERE b.status = 'finalized' AND b.finalized_at::date >= %s::date
+            GROUP BY p.category, dow_num, day_name
+            ORDER BY p.category, total_sales DESC
+        """, (start,))
+        rows = cur.fetchall()
+        cur.close()
+
+        # Group by category
+        cat_map: Dict[str, Dict[str, Any]] = {}
+        for r in rows:
+            cat = r["category"]
+            day = r["day_name"].strip()
+            sales = float(r["total_sales"])
+            qty = float(r["total_qty"])
+
+            if cat not in cat_map:
+                cat_map[cat] = {
+                    "category": cat,
+                    "total_category_revenue": 0.0,
+                    "days": {},
+                    "peak_day": None,
+                    "peak_sales": 0.0
+                }
+
+            cat_map[cat]["total_category_revenue"] += sales
+            cat_map[cat]["days"][day] = {
+                "sales": round(sales, 2),
+                "qty": round(qty, 2)
+            }
+            if sales > cat_map[cat]["peak_sales"]:
+                cat_map[cat]["peak_sales"] = sales
+                cat_map[cat]["peak_day"] = day
+
+        categories_summary = []
+        for cat, data in sorted(cat_map.items(), key=lambda x: x[1]["total_category_revenue"], reverse=True):
+            data["total_category_revenue"] = round(data["total_category_revenue"], 2)
+            data["peak_sales"] = round(data["peak_sales"], 2)
+            categories_summary.append(data)
+
+        lines = [f"📈 **Category Sales Heatmap (Past {days} Days)**\n"]
+        for c in categories_summary:
+            lines.append(
+                f"🏷️ **{c['category']}** (Total: ₹{c['total_category_revenue']:,.2f})\n"
+                f"  • 🔥 Peak Day: **{c['peak_day']}** (₹{c['peak_sales']:,.2f})\n"
+                f"  • Weekly Pattern: " + ", ".join([f"{d[:3]}: ₹{vals['sales']:,.0f}" for d, vals in c['days'].items()])
+            )
+
+        return {
+            "status": "success",
+            "period_days": days,
+            "categories_analyzed": len(categories_summary),
+            "heatmap": categories_summary,
+            "message": "\n\n".join(lines) if categories_summary else "No sales data found for heatmap."
+        }
+    finally:
+        conn.close()
+
+
+def business_health_score() -> Dict[str, Any]:
+    """
+    Comprehensive 0-100 Business Health Score across 4 core supermarket pillars:
+      1. Profitability & Margins (0-25 pts)
+      2. Inventory Health & Stockouts (0-25 pts)
+      3. Khata & Cash Flow Collection (0-25 pts)
+      4. Sales Velocity & Demand Stability (0-25 pts)
+    Provides an overall letter grade (A+, A, B, C, D) and prioritized action items.
+    """
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+
+        # 1. Profitability (last 30 days)
+        thirty_days_ago = (date.today() - timedelta(days=30)).isoformat()
+        cur.execute("""
+            SELECT COALESCE(SUM(b.subtotal), 0) AS rev,
+                   COALESCE(SUM(bi.qty * p.cost_price), 0) AS cogs
+            FROM bill_items bi
+            JOIN bills b ON bi.bill_id = b.bill_id
+            JOIN products p ON bi.sku_id = p.sku_id
+            WHERE b.status = 'finalized' AND b.finalized_at::date >= %s::date
+        """, (thirty_days_ago,))
+        profit_row = cur.fetchone()
+        rev = float(profit_row["rev"])
+        cogs = float(profit_row["cogs"])
+        gross_profit = rev - cogs
+        margin_pct = (gross_profit / rev * 100) if rev > 0 else 0.0
+
+        # Score Pillar 1: Target margin 18%+
+        if margin_pct >= 20.0:
+            pillar1_score = 25.0
+        elif margin_pct >= 15.0:
+            pillar1_score = 20.0
+        elif margin_pct >= 10.0:
+            pillar1_score = 15.0
+        elif margin_pct > 0:
+            pillar1_score = 10.0
+        else:
+            pillar1_score = 5.0
+
+        # 2. Inventory Health (active products, low stock, out of stock)
+        cur.execute("SELECT COUNT(*) AS total, SUM(CASE WHEN quantity <= reorder_level THEN 1 ELSE 0 END) AS low, SUM(CASE WHEN quantity <= 0 THEN 1 ELSE 0 END) AS oos FROM products WHERE is_active = TRUE")
+        inv_row = cur.fetchone()
+        total_prods = inv_row["total"] or 1
+        low_count = inv_row["low"] or 0
+        oos_count = inv_row["oos"] or 0
+
+        stockout_rate = (oos_count / total_prods) * 100
+        low_rate = (low_count / total_prods) * 100
+
+        if stockout_rate == 0 and low_rate <= 10:
+            pillar2_score = 25.0
+        elif stockout_rate <= 5 and low_rate <= 20:
+            pillar2_score = 20.0
+        elif stockout_rate <= 10:
+            pillar2_score = 15.0
+        else:
+            pillar2_score = 8.0
+
+        # 3. Khata & Cash Flow
+        cur.execute("SELECT COALESCE(SUM(khata_balance), 0) AS total_debt FROM customers")
+        debt_row = cur.fetchone()
+        total_debt = float(debt_row["total_debt"])
+
+        # Ratio of pending debt to monthly revenue
+        debt_to_rev_ratio = (total_debt / rev) if rev > 0 else 0.5
+        if debt_to_rev_ratio <= 0.15:
+            pillar3_score = 25.0
+        elif debt_to_rev_ratio <= 0.30:
+            pillar3_score = 20.0
+        elif debt_to_rev_ratio <= 0.50:
+            pillar3_score = 14.0
+        else:
+            pillar3_score = 8.0
+
+        # 4. Sales Velocity (this 7 days vs previous 7 days)
+        last_7_days = (date.today() - timedelta(days=7)).isoformat()
+        prev_7_days = (date.today() - timedelta(days=14)).isoformat()
+        cur.execute("SELECT COALESCE(SUM(total), 0) FROM bills WHERE status = 'finalized' AND finalized_at::date >= %s::date", (last_7_days,))
+        recent_7_rev = float(cur.fetchone()["coalesce"])
+        cur.execute("SELECT COALESCE(SUM(total), 0) FROM bills WHERE status = 'finalized' AND finalized_at::date >= %s::date AND finalized_at::date < %s::date", (prev_7_days, last_7_days))
+        prev_7_rev = float(cur.fetchone()["coalesce"])
+        cur.close()
+
+        if prev_7_rev > 0:
+            growth_pct = ((recent_7_rev - prev_7_rev) / prev_7_rev) * 100
+            if growth_pct >= 5.0:
+                pillar4_score = 25.0
+            elif growth_pct >= 0:
+                pillar4_score = 20.0
+            elif growth_pct >= -10:
+                pillar4_score = 15.0
+            else:
+                pillar4_score = 10.0
+        else:
+            pillar4_score = 18.0 if recent_7_rev > 0 else 10.0
+
+        total_score = round(pillar1_score + pillar2_score + pillar3_score + pillar4_score, 1)
+
+        if total_score >= 90:
+            grade = "A+ (Outstanding)"
+        elif total_score >= 80:
+            grade = "A (Excellent)"
+        elif total_score >= 70:
+            grade = "B (Healthy)"
+        elif total_score >= 60:
+            grade = "C (Needs Attention)"
+        else:
+            grade = "D (High Risk)"
+
+        recommendations = []
+        if pillar1_score < 20:
+            recommendations.append("• 💡 Review pricing: Gross margin is below target. Consider increasing prices on fast-moving loose items.")
+        if pillar2_score < 20:
+            recommendations.append(f"• 📦 Reorder stock: {low_count} items are at/below reorder level and {oos_count} are completely out of stock.")
+        if pillar3_score < 20:
+            recommendations.append(f"• 💳 Collect khata: Outstanding credit is ₹{total_debt:,.2f}. Send WhatsApp reminders to clear overdue balances.")
+        if pillar4_score < 20:
+            recommendations.append("• 🛍️ Run a promotional combo or clearance offer to stimulate weekly sales volume.")
+
+        if not recommendations:
+            recommendations.append("• 🌟 Keep up the great work! All 4 pillars are operating at peak efficiency.")
+
+        lines = [
+            f"🏥 **Supermarket Business Health Score: {total_score}/100 — Grade {grade}**\n",
+            f"📊 **Pillar Breakdown:**",
+            f"  1. 💰 Profitability & Margins: {pillar1_score}/25 (Margin: {margin_pct:.1f}%)",
+            f"  2. 📦 Inventory Health: {pillar2_score}/25 ({low_count} low stock, {oos_count} out of stock)",
+            f"  3. 💳 Khata & Debt Ratio: {pillar3_score}/25 (Total pending: ₹{total_debt:,.2f})",
+            f"  4. 📈 Sales Momentum: {pillar4_score}/25 (Last 7d rev: ₹{recent_7_rev:,.2f})\n",
+            f"🎯 **Actionable Recommendations:**",
+            "\n".join(recommendations)
+        ]
+
+        return {
+            "status": "success",
+            "overall_score": total_score,
+            "grade": grade,
+            "pillars": {
+                "profitability": {"score": pillar1_score, "max": 25, "margin_pct": round(margin_pct, 1)},
+                "inventory": {"score": pillar2_score, "max": 25, "low_count": low_count, "out_of_stock": oos_count},
+                "khata_cash_flow": {"score": pillar3_score, "max": 25, "total_debt": round(total_debt, 2)},
+                "sales_momentum": {"score": pillar4_score, "max": 25, "recent_7_revenue": round(recent_7_rev, 2)}
+            },
+            "recommendations": recommendations,
+            "message": "\n".join(lines)
+        }
+    finally:
+        conn.close()
+
+

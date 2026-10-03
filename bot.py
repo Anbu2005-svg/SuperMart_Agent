@@ -360,6 +360,132 @@ async def expiry_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
     await update.message.reply_text(res.get("message", "No expiry data."), parse_mode="Markdown", reply_markup=reply_markup)
 
+async def profit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /profit [YYYY-MM-DD] command — view daily profit dashboard."""
+    telegram_id = str(update.effective_user.id) if update.effective_user else "default"
+    if not get_user_session(telegram_id):
+        await update.message.reply_text("🔐 Authentication required. Send /start to log into your shop.", parse_mode="Markdown")
+        return
+    date_arg = context.args[0].strip() if context.args else None
+    from skills.analytics import daily_profit_dashboard
+    res = daily_profit_dashboard(date_arg)
+    await update.message.reply_text(res.get("message", "Could not generate profit dashboard."), parse_mode="Markdown")
+
+async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /history <customer_name> command — customer purchase history."""
+    telegram_id = str(update.effective_user.id) if update.effective_user else "default"
+    if not get_user_session(telegram_id):
+        await update.message.reply_text("🔐 Authentication required. Send /start to log into your shop.", parse_mode="Markdown")
+        return
+    if not context.args:
+        await update.message.reply_text("👤 Usage: `/history <customer name>` (e.g. `/history Ramesh`)", parse_mode="Markdown")
+        return
+    cust_name = " ".join(context.args).strip()
+    from skills.customer_history import get_customer_purchase_history
+    res = get_customer_purchase_history(cust_name)
+    await update.message.reply_text(res.get("message", "No history found."), parse_mode="Markdown")
+
+async def suggestions_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /suggestions [customer_name] command — smart repurchase reminders."""
+    telegram_id = str(update.effective_user.id) if update.effective_user else "default"
+    if not get_user_session(telegram_id):
+        await update.message.reply_text("🔐 Authentication required. Send /start to log into your shop.", parse_mode="Markdown")
+        return
+    from skills.customer_history import get_customer_smart_suggestions, get_all_customer_repurchase_alerts
+    if context.args:
+        cust_name = " ".join(context.args).strip()
+        res = get_customer_smart_suggestions(cust_name)
+    else:
+        res = get_all_customer_repurchase_alerts()
+    await update.message.reply_text(res.get("message", "No suggestions available."), parse_mode="Markdown")
+
+async def heatmap_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /heatmap command — category sales heatmap by day of week."""
+    telegram_id = str(update.effective_user.id) if update.effective_user else "default"
+    if not get_user_session(telegram_id):
+        await update.message.reply_text("🔐 Authentication required. Send /start to log into your shop.", parse_mode="Markdown")
+        return
+    from skills.analytics import category_sales_heatmap
+    res = category_sales_heatmap(30)
+    await update.message.reply_text(res.get("message", "No heatmap data available."), parse_mode="Markdown")
+
+async def po_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /po [supplier] command — auto purchase order generator with PDF."""
+    telegram_id = str(update.effective_user.id) if update.effective_user else "default"
+    if not get_user_session(telegram_id):
+        await update.message.reply_text("🔐 Authentication required. Send /start to log into your shop.", parse_mode="Markdown")
+        return
+    supplier = " ".join(context.args).strip() if context.args else None
+    from skills.purchase_orders import generate_purchase_order
+    res = generate_purchase_order(supplier_name=supplier)
+    await update.message.reply_text(res.get("message", "Could not generate PO."), parse_mode="Markdown")
+    if res.get("file_path") and os.path.exists(res["file_path"]):
+        with open(res["file_path"], "rb") as doc:
+            await update.message.reply_document(document=doc, filename=os.path.basename(res["file_path"]), caption=f"📄 Purchase Order {res.get('po_id')}")
+
+async def gstr1_json_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /gstr1_json command — government-ready GSTR-1 JSON export."""
+    telegram_id = str(update.effective_user.id) if update.effective_user else "default"
+    if not get_user_session(telegram_id):
+        await update.message.reply_text("🔐 Authentication required. Send /start to log into your shop.", parse_mode="Markdown")
+        return
+    from skills.gst_export import export_gstr1_json
+    res = export_gstr1_json()
+    await update.message.reply_text(res.get("message", "Could not export GSTR-1 JSON."), parse_mode="Markdown")
+    if res.get("file_path") and os.path.exists(res["file_path"]):
+        with open(res["file_path"], "rb") as doc:
+            await update.message.reply_document(document=doc, filename=os.path.basename(res["file_path"]), caption="🏛️ GSTR-1 JSON (GST Offline Tool Ready)")
+
+async def deadstock_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /deadstock [days] command — audit slow moving and dead inventory."""
+    telegram_id = str(update.effective_user.id) if update.effective_user else "default"
+    if not get_user_session(telegram_id):
+        await update.message.reply_text("🔐 Authentication required. Send /start to log into your shop.", parse_mode="Markdown")
+        return
+    days = 30
+    if context.args:
+        try:
+            days = int(context.args[0].strip())
+        except ValueError:
+            pass
+    from skills.inventory import detect_dead_stock
+    res = detect_dead_stock(no_sales_days=days)
+    await update.message.reply_text(res.get("message", "No dead stock data."), parse_mode="Markdown")
+
+async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /health command — 0-100 business health score."""
+    telegram_id = str(update.effective_user.id) if update.effective_user else "default"
+    if not get_user_session(telegram_id):
+        await update.message.reply_text("🔐 Authentication required. Send /start to log into your shop.", parse_mode="Markdown")
+        return
+    from skills.analytics import business_health_score
+    res = business_health_score()
+    await update.message.reply_text(res.get("message", "Health score unavailable."), parse_mode="Markdown")
+
+async def eod_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /eod command — end-of-day executive closing summary."""
+    telegram_id = str(update.effective_user.id) if update.effective_user else "default"
+    if not get_user_session(telegram_id):
+        await update.message.reply_text("🔐 Authentication required. Send /start to log into your shop.", parse_mode="Markdown")
+        return
+    from skills.eod_report import generate_end_of_day_report
+    res = generate_end_of_day_report()
+    await update.message.reply_text(res.get("message", "EOD report unavailable."), parse_mode="Markdown")
+
+async def shop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /shop [name] command — multi-shop switcher and branch list."""
+    telegram_id = str(update.effective_user.id) if update.effective_user else "default"
+    if not get_user_session(telegram_id):
+        await update.message.reply_text("🔐 Authentication required. Send /start to log into your shop.", parse_mode="Markdown")
+        return
+    from skills.shop_manager import list_shops, switch_active_shop
+    if context.args:
+        target_name = " ".join(context.args).strip()
+        res = switch_active_shop(telegram_id, target_name)
+    else:
+        res = list_shops()
+    await update.message.reply_text(res.get("message", "No shop info."), parse_mode="Markdown")
+
 async def handle_voice_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handle voice notes and audio clips: transcribe using Groq Whisper AI in real-time
@@ -642,7 +768,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /help command — displays command menu and quick start guide."""
     help_text = (
         "🤖 *Supermarket Ops Agent — Available Commands*\n\n"
-        "• `/start` — Start bot session & verify mobile contact\n"
+        "📦 *Operations & Billing:*\n"
+        "• `/start` — Start bot session & shop login\n"
         "• `/barcode <number>` — Scan photo or enter barcode\n"
         "• `/stock` — View inventory products, quantities & MRPs\n"
         "• `/lowstock` — View low stock items at or below reorder level\n"
@@ -650,14 +777,23 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/upi <bill_id | amount>` — Dynamic UPI QR code (GPay/PhonePe/Paytm/BHIM)\n"
         "• `/expiry [days]` — Smart expiry tracking & clearance markdown engine\n"
         "• `/khata [customer]` — View customer credit ledgers & WhatsApp reminders\n"
-        "• `/summary` — View today's sales & revenue breakdown\n"
         "• `/invoice <bill_id>` — Download official PDF GST Tax Invoice with embedded UPI QR\n"
-        "• `/analysis <period>` — Download PowerPoint (.pptx) operations sales deck\n"
+        "• `/analysis <period>` — Download PowerPoint (.pptx) operations sales deck\n\n"
+        "🚀 *Enterprise & Analytics Suite:*\n"
+        "• `/profit` — Daily gross profit dashboard, margins & comparisons\n"
+        "• `/history <customer>` — Customer purchase history & favorite items\n"
+        "• `/suggestions [customer]` — Smart re-purchase reminders for essentials\n"
+        "• `/heatmap` — Category sales heatmap by day of week\n"
+        "• `/po [supplier]` — Auto-generate Purchase Order with PDF export\n"
+        "• `/gstr1_json` — Export government-ready GSTR-1 JSON for portal upload\n"
+        "• `/deadstock` — Audit slow-moving / dead stock products\n"
+        "• `/health` — 0-100 Supermarket Business Health Score\n"
+        "• `/eod` — End-of-day executive closing summary report\n"
+        "• `/shop [name]` — Multi-shop manager & branch switcher\n"
         "• `/new` — Reset conversation context (standing preferences persist)\n"
-        "• `/logout` — De-authenticate user session\n"
-        "• `/help` — Show this interactive command guide\n\n"
+        "• `/logout` — De-authenticate user session\n\n"
         "🎙️ *Voice Note Billing:* Send a Telegram voice note in **Tamil, Hindi, or English** (e.g. _'2 packet Maggi bill pannunga'_ or _'1kg sugar Ramesh khata me dalo'_)\n\n"
-        "💬 *You can also ask anything in plain text:* e.g. \"Show stock\", \"Start a bill\", \"Charge khata ₹500 to Ravi\", \"Show today's sales summary\""
+        "💬 *Natural Language:* You can ask anything in plain text: e.g. \"Show profit today\", \"What is Ramesh due to buy?\", \"Generate PO for distributor\", \"What is our business health score?\""
     )
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
@@ -946,6 +1082,16 @@ async def post_init(application):
         BotCommand("bill", "Create a bill (e.g. /bill 2 sugar, UPI)"),
         BotCommand("upi", "Dynamic UPI QR code (e.g. /upi 250)"),
         BotCommand("expiry", "Smart expiry alerts & clearance discounts"),
+        BotCommand("profit", "View daily profit, margins & trends"),
+        BotCommand("history", "Customer purchase profile & top bought items"),
+        BotCommand("suggestions", "Smart re-purchase reminders for customers"),
+        BotCommand("heatmap", "Category sales heatmap by day of week"),
+        BotCommand("po", "Auto-generate purchase order PDF"),
+        BotCommand("gstr1_json", "Export government-ready GSTR-1 JSON"),
+        BotCommand("deadstock", "Audit slow-moving / dead stock products"),
+        BotCommand("health", "0-100 Supermarket Business Health Score"),
+        BotCommand("eod", "End-of-day executive closing summary"),
+        BotCommand("shop", "Multi-shop manager & branch switcher"),
         BotCommand("khata", "View customer credit balances"),
         BotCommand("summary", "View today's sales & revenue summary"),
         BotCommand("invoice", "Download PDF GST Tax Invoice"),
@@ -1262,16 +1408,29 @@ def start_proactive_notifications_scheduler():
         except Exception as e:
             logger.error(f"Daily closeout job error: {e}")
 
+    def job_eod_report():
+        """10 PM IST — Send complete End-of-Day executive report."""
+        try:
+            from skills.eod_report import generate_end_of_day_report
+            result = generate_end_of_day_report()
+            if result.get("status") == "success":
+                _send_notification(result["message"])
+                logger.info(f"🌙 Sent EOD closing report for {result.get('date')}")
+        except Exception as e:
+            logger.error(f"EOD report job error: {e}")
+
     # Schedule jobs
     scheduler.add_job(job_expiry_alerts, CronTrigger(hour=9, minute=0), id="expiry_alerts")
     scheduler.add_job(job_low_stock_check, CronTrigger(hour="*/4", minute=30), id="low_stock_check")
     scheduler.add_job(job_daily_closeout, CronTrigger(hour=21, minute=0), id="daily_closeout")
+    scheduler.add_job(job_eod_report, CronTrigger(hour=22, minute=0), id="eod_closing_report")
 
     scheduler.start()
     print("🔔 Proactive notifications scheduler started:")
     print("   ⏰ 9:00 AM IST  → Expiry alerts (items expiring within 7 days)")
     print("   ⏰ Every 4 hours → Low-stock warnings")
     print("   ⏰ 9:00 PM IST  → Daily closeout summary")
+    print("   ⏰ 10:00 PM IST → End-of-Day (EOD) executive report")
 
 
 def main():
@@ -1314,6 +1473,16 @@ def main():
     app.add_handler(CommandHandler("analysis", analysis_command))
     app.add_handler(CommandHandler("upi", upi_command))
     app.add_handler(CommandHandler("expiry", expiry_command))
+    app.add_handler(CommandHandler("profit", profit_command))
+    app.add_handler(CommandHandler("history", history_command))
+    app.add_handler(CommandHandler("suggestions", suggestions_command))
+    app.add_handler(CommandHandler("heatmap", heatmap_command))
+    app.add_handler(CommandHandler("po", po_command))
+    app.add_handler(CommandHandler("gstr1_json", gstr1_json_command))
+    app.add_handler(CommandHandler("deadstock", deadstock_command))
+    app.add_handler(CommandHandler("health", health_command))
+    app.add_handler(CommandHandler("eod", eod_command))
+    app.add_handler(CommandHandler("shop", shop_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CallbackQueryHandler(button_callback_handler))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice_note))

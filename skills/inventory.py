@@ -1,6 +1,7 @@
 import math
 import re
 import uuid
+from datetime import date, datetime, timedelta
 from typing import Dict, Any, List, Optional
 from db.models import get_db_connection, immediate_transaction
 from skills.audit import _log_event
@@ -608,3 +609,100 @@ def update_gst_slab(
             }
     finally:
         conn.close()
+
+
+def detect_dead_stock(no_sales_days: int = 30) -> Dict[str, Any]:
+    """
+    Detect non-moving / dead stock products with positive inventory but ZERO sales in the last `no_sales_days` days.
+    Calculates locked-up working capital and recommends clearance / discount / bundle liquidation strategies.
+    """
+    try:
+        no_sales_days_int = int(no_sales_days)
+    except (ValueError, TypeError):
+        return {"status": "error", "message": "no_sales_days must be a valid integer."}
+
+    days = max(7, min(365, no_sales_days_int))
+    cutoff_date = (date.today() - timedelta(days=days)).isoformat()
+
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        # Find active products with stock > 0 that have NOT been sold since cutoff_date
+        cur.execute("""
+            SELECT p.sku_id, p.name, p.category, p.unit, p.quantity, p.cost_price, p.mrp,
+                   MAX(b.finalized_at) AS last_sold_at
+            FROM products p
+            LEFT JOIN bill_items bi ON p.sku_id = bi.sku_id
+            LEFT JOIN bills b ON bi.bill_id = b.bill_id AND b.status = 'finalized'
+            WHERE p.is_active = TRUE AND p.quantity > 0
+            GROUP BY p.sku_id, p.name, p.category, p.unit, p.quantity, p.cost_price, p.mrp
+            HAVING MAX(b.finalized_at) IS NULL OR MAX(b.finalized_at)::date < %s::date
+            ORDER BY (p.quantity * p.cost_price) DESC
+        """, (cutoff_date,))
+        rows = cur.fetchall()
+        cur.close()
+
+        dead_stock_items = []
+        total_locked_capital = 0.0
+
+        today = date.today()
+        for r in rows:
+            qty = float(r["quantity"])
+            cost = float(r["cost_price"])
+            locked_capital = round(qty * cost, 2)
+            total_locked_capital += locked_capital
+
+            last_sold = r["last_sold_at"].date() if r["last_sold_at"] else None
+            days_inactive = (today - last_sold).days if last_sold else "Never"
+
+            # Recommended strategy based on days inactive
+            if last_sold is None or (isinstance(days_inactive, int) and days_inactive >= 60):
+                rec_action = "⚡ Deep Clearance (30% Markdown or Supplier Return)"
+            elif isinstance(days_inactive, int) and days_inactive >= 45:
+                rec_action = "🏷️ Flash Sale (15-20% Discount)"
+            else:
+                rec_action = "🎁 Combo Bundle (Pair with fast-moving essential)"
+
+            dead_stock_items.append({
+                "sku_id": r["sku_id"],
+                "name": r["name"],
+                "category": r["category"],
+                "unit": r["unit"],
+                "quantity": qty,
+                "cost_price": cost,
+                "mrp": float(r["mrp"]),
+                "locked_capital": locked_capital,
+                "days_inactive": days_inactive,
+                "recommended_action": rec_action
+            })
+
+        total_locked_capital = round(total_locked_capital, 2)
+
+        lines = [
+            f"📦 **Dead Stock & Slow-Moving Inventory Audit (No sales in {days}+ days)**\n",
+            f"⚠️ **Items Identified:** {len(dead_stock_items)}",
+            f"💸 **Total Locked-Up Working Capital:** ₹{total_locked_capital:,.2f}\n",
+            "📋 **Liquidation Targets (Sorted by capital tied up):**"
+        ]
+        for it in dead_stock_items[:8]:
+            days_str = f"{it['days_inactive']} days" if isinstance(it["days_inactive"], int) else "Never sold"
+            lines.append(
+                f"• **{it['name']}** [{it['sku_id']}]\n"
+                f"  Stock: {it['quantity']} {it['unit']} | Locked Capital: ₹{it['locked_capital']:,.2f} | Inactive: {days_str}\n"
+                f"  👉 Action: {it['recommended_action']}"
+            )
+
+        if not dead_stock_items:
+            lines = [f"✅ **Great news!** Zero dead stock found. All inventory products have registered sales within the last {days} days."]
+
+        return {
+            "status": "success",
+            "threshold_days": days,
+            "dead_stock_count": len(dead_stock_items),
+            "total_locked_capital": total_locked_capital,
+            "items": dead_stock_items,
+            "message": "\n\n".join(lines) if dead_stock_items else lines[0]
+        }
+    finally:
+        conn.close()
+
