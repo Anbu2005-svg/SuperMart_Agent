@@ -24,6 +24,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Suppress HTTP client request logs to prevent Telegram bot token exposure in URLs
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 # In-memory guard: prevent the same Telegram update_id from being processed
 # more than once in a single bot process (handles Telegram's retry/duplicate sends)
 _PROCESSING_UPDATES: set = set()
@@ -142,6 +146,19 @@ def get_empty_inventory_keyboard():
     keyboard = [
         [InlineKeyboardButton("📦 Add Default Problem Statement Stocks", callback_data="seed_default_stocks")],
         [InlineKeyboardButton("➕ Skip & Add Custom Stocks", callback_data="skip_default_stocks")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_barcode_action_keyboard(barcode: str, sku_id: str):
+    """Returns inline buttons for product actions upon barcode scan."""
+    keyboard = [
+        [
+            InlineKeyboardButton("🛒 Add to Bill", callback_data=f"bc_bill:{barcode}"),
+            InlineKeyboardButton("📦 Restock +10", callback_data=f"bc_restock:{sku_id}")
+        ],
+        [
+            InlineKeyboardButton("🔍 View Stock & Batches", callback_data=f"bc_view:{sku_id}")
+        ]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -620,6 +637,49 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             "`Add product Milk 1L, MRP 60, Cost 50, Stock 20` or type `/stock`!",
             parse_mode="Markdown"
         )
+    elif query.data.startswith("bc_bill:"):
+        bc = query.data.split(":", 1)[1]
+        from skills.barcode import lookup_product_by_barcode
+        from skills.billing import start_bill, add_item_to_bill
+        lk = lookup_product_by_barcode(bc)
+        if lk.get("status") == "success":
+            p = lk["product"]
+            b = start_bill()
+            add_res = add_item_to_bill(b["bill_id"], p["sku_id"], 1)
+            if add_res.get("status") == "success":
+                await query.edit_message_text(
+                    f"🛒 **Added 1x {p['name']} to draft bill `{b['bill_id']}`!**\n\n"
+                    f"Subtotal: ₹{p['mrp']:.2f}\n"
+                    f"Type `/bill` to view or finalize payment.",
+                    parse_mode="Markdown"
+                )
+            else:
+                await query.edit_message_text(f"⚠️ Could not add to bill: {add_res.get('message')}")
+        else:
+            await query.edit_message_text(f"❌ Product not found for barcode `{bc}`")
+    elif query.data.startswith("bc_restock:"):
+        sku = query.data.split(":", 1)[1]
+        from skills.inventory import receive_stock
+        res = receive_stock(sku_id=sku, qty=10)
+        if res.get("status") == "success":
+            await query.edit_message_text(f"📦 **Restocked +10 units!** New stock: {res['product']['quantity']} {res['product']['unit']}", parse_mode="Markdown")
+        else:
+            await query.edit_message_text(f"❌ Failed to restock: {res.get('message')}")
+    elif query.data.startswith("bc_view:"):
+        sku = query.data.split(":", 1)[1]
+        from skills.inventory import get_stock
+        st = get_stock(sku)
+        if st.get("status") == "success":
+            p = st["product"]
+            await query.edit_message_text(
+                f"📊 **Product Details:**\n\n"
+                f"• **Name:** {p['name']}\n"
+                f"• **SKU:** `{p['sku_id']}`\n"
+                f"• **Stock:** {p['quantity']} {p['unit']}\n"
+                f"• **Reorder Level:** {p['reorder_level']}\n"
+                f"• **Cost:** ₹{p['cost_price']} | **MRP:** ₹{p['mrp']}",
+                parse_mode="Markdown"
+            )
 
 async def stock_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /stock command."""
@@ -653,10 +713,160 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /summary command."""
     await handle_message(update, context, user_text_override="Show today's sales summary and total revenue breakdown")
 
+async def barcode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /barcode <number> command for handheld scanners or manual code entry."""
+    telegram_id = str(update.effective_user.id) if update.effective_user else "default"
+    session = get_user_session(telegram_id)
+    if not session:
+        await update.message.reply_text("🔐 Authentication required. Send /start to log into your shop.", parse_mode="Markdown")
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "📸 **Barcode & QR Scanner**\n\n"
+            "• **Send a photo:** Snap a picture of any product barcode/QR code and send it directly into this chat.\n"
+            "• **Type barcode:** `/barcode <number>` (e.g. `/barcode 8901030383458`)\n"
+            "• **Handheld scanner:** Aim and scan with your USB/Bluetooth barcode gun into the chat!",
+            parse_mode="Markdown"
+        )
+        return
+
+    barcode_str = context.args[0].strip()
+    from skills.barcode import lookup_product_by_barcode
+    lookup = lookup_product_by_barcode(barcode_str)
+
+    if lookup.get("status") == "success":
+        prod = lookup["product"]
+        caption = (
+            f"✅ **Barcode Scanned:** `{barcode_str}`\n\n"
+            f"🏷️ **Product:** {prod['name']}\n"
+            f"• **SKU:** `{prod['sku_id']}`\n"
+            f"• **Price (MRP):** ₹{prod['mrp']:.2f} (GST: {prod['gst_slab']}%)\n"
+            f"• **Current Stock:** {prod['quantity']} {prod['unit']}"
+        )
+        if prod.get("earliest_batch") and prod["earliest_batch"].get("expiry_date"):
+            caption += f"\n• **Nearest Expiry:** {prod['earliest_batch']['expiry_date']} (Batch: {prod['earliest_batch']['batch_code']})"
+
+        await update.message.reply_text(
+            caption,
+            parse_mode="Markdown",
+            reply_markup=get_barcode_action_keyboard(barcode_str, prod["sku_id"])
+        )
+    elif lookup.get("status") == "global_recognized":
+        gp = lookup["global_product"]
+        caption = (
+            f"🌍 **Global Product Recognized!**\n\n"
+            f"🏷️ **Product:** {gp['name']}\n"
+            f"• **Brand:** {gp['brand']}\n"
+            f"• **Category:** {gp['category']}\n"
+            f"• **Origin:** {gp['origin_country']}\n"
+            f"• **Barcode:** `{barcode_str}`\n\n"
+            "💡 *This product is verified in the global product registry, but not yet in your local supermarket inventory.*\n\n"
+            "To add it to your shop, ask the agent:\n"
+            f"`Add {gp['name']} to inventory with price <MRP> and stock <qty>`"
+        )
+        await update.message.reply_text(caption, parse_mode="Markdown")
+    else:
+        origin = lookup.get("origin_country", "International")
+        await update.message.reply_text(
+            f"📦 **Unregistered Barcode:** `{barcode_str}`\n"
+            f"🌐 **GS1 Origin:** {origin}\n\n"
+            "This barcode is not mapped to any product in your supermarket.\n\n"
+            "To link it to an existing product, ask the agent:\n"
+            f"`Link barcode {barcode_str} to <product name>`\n"
+            "Or register it as a new product:\n"
+            f"`Add product <name> with barcode {barcode_str} price <MRP>`",
+            parse_mode="Markdown"
+        )
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle incoming product photo or barcode image upload."""
+    if not update.message or not update.message.photo:
+        return
+
+    telegram_id = str(update.effective_user.id) if update.effective_user else "default"
+    session = get_user_session(telegram_id)
+    if not session:
+        await update.message.reply_text("🔐 Authentication required. Send /start to log into your shop.", parse_mode="Markdown")
+        return
+
+    status_msg = await update.message.reply_text("🔍 Scanning barcode from image...", parse_mode="Markdown")
+
+    try:
+        photo = update.message.photo[-1]
+        photo_file = await context.bot.get_file(photo.file_id)
+        photo_bytes = await photo_file.download_as_bytearray()
+
+        from skills.barcode import scan_barcode_from_image, lookup_product_by_barcode
+        scan_res = scan_barcode_from_image(bytes(photo_bytes))
+
+        if scan_res.get("status") != "success" or not scan_res.get("primary_barcode"):
+            await status_msg.edit_text(
+                "🔍 **No Barcode Detected**\n\n"
+                "Could not detect a clear barcode in this photo.\n\n"
+                "💡 *Tips for better scanning:*\n"
+                "• Hold the camera steady and flat directly over the barcode\n"
+                "• Ensure good lighting without glare or shadow\n"
+                "• Or manually enter the number using `/barcode <digits>`",
+                parse_mode="Markdown"
+            )
+            return
+
+        barcode_str = scan_res["primary_barcode"]
+        lookup = lookup_product_by_barcode(barcode_str)
+
+        if lookup.get("status") == "success":
+            prod = lookup["product"]
+            caption = (
+                f"✅ **Barcode Scanned:** `{barcode_str}`\n\n"
+                f"🏷️ **Product:** {prod['name']}\n"
+                f"• **SKU:** `{prod['sku_id']}`\n"
+                f"• **Price (MRP):** ₹{prod['mrp']:.2f} (GST: {prod['gst_slab']}%)\n"
+                f"• **Current Stock:** {prod['quantity']} {prod['unit']}"
+            )
+            if prod.get("earliest_batch") and prod["earliest_batch"].get("expiry_date"):
+                caption += f"\n• **Nearest Expiry:** {prod['earliest_batch']['expiry_date']} (Batch: {prod['earliest_batch']['batch_code']})"
+
+            await status_msg.edit_text(
+                caption,
+                parse_mode="Markdown",
+                reply_markup=get_barcode_action_keyboard(barcode_str, prod["sku_id"])
+            )
+        elif lookup.get("status") == "global_recognized":
+            gp = lookup["global_product"]
+            caption = (
+                f"🌍 **Global Product Recognized!**\n\n"
+                f"🏷️ **Product:** {gp['name']}\n"
+                f"• **Brand:** {gp['brand']}\n"
+                f"• **Category:** {gp['category']}\n"
+                f"• **Origin:** {gp['origin_country']}\n"
+                f"• **Barcode:** `{barcode_str}`\n\n"
+                "💡 *This product is verified in the global registry (Open Food Facts) but not in your local shop inventory yet.*\n\n"
+                "To add it to your shop, tell the agent:\n"
+                f"`Add {gp['name']} to inventory with price <MRP> and stock <qty>`"
+            )
+            await status_msg.edit_text(caption, parse_mode="Markdown")
+        else:
+            origin = lookup.get("origin_country", "International")
+            await status_msg.edit_text(
+                f"📦 **Unregistered Barcode Scanned:** `{barcode_str}`\n"
+                f"🌐 **GS1 Origin:** {origin}\n\n"
+                "This barcode is not mapped to any product in your supermarket.\n\n"
+                "To link it to an existing product, ask the agent:\n"
+                f"`Link barcode {barcode_str} to <product name>`\n"
+                "Or register it as a new product:\n"
+                f"`Add product <name> with barcode {barcode_str} price <MRP>`",
+                parse_mode="Markdown"
+            )
+    except Exception as e:
+        logger.error(f"Error handling barcode photo: {e}", exc_info=True)
+        await status_msg.edit_text("⚠️ An error occurred while scanning the image. Please try again.")
+
 async def post_init(application):
     """Register interactive slash commands list with Telegram UI popup menu."""
     commands = [
         BotCommand("start", "Start session & fresh context"),
+        BotCommand("barcode", "Scan or enter barcode (e.g. /barcode 8901030383458)"),
         BotCommand("stock", "View all products & inventory stock"),
         BotCommand("lowstock", "View low stock reorder items"),
         BotCommand("bill", "Create a bill (e.g. /bill 2 sugar, UPI)"),
@@ -672,31 +882,54 @@ async def post_init(application):
     logger.info("Successfully pushed comprehensive bot commands menu to Telegram API.")
 
 def start_health_check_server():
-    """Starts a minimal HTTP server in a background thread to satisfy Render Web Service port checks."""
+    """Starts a hardened HTTP server in a background thread to satisfy Render Web Service port checks."""
     import threading
     from http.server import HTTPServer, BaseHTTPRequestHandler
+    from skills.security import get_security_headers, check_http_rate_limit
 
     class HealthCheckHandler(BaseHTTPRequestHandler):
-        def do_GET(self):
+        server_version = "SuperMartOps/2026"
+        sys_version = ""
+
+        def _send_headers(self, status_code: int, content_type: str = "text/plain; charset=utf-8"):
+            self.send_response(status_code)
+            self.send_header("Content-Type", content_type)
+            for header, value in get_security_headers().items():
+                self.send_header(header, value)
+            self.end_headers()
+
+        def do_OPTIONS(self):
+            """Handle CORS pre-flight checks cleanly."""
+            self._send_headers(204)
+
+        def do_HEAD(self):
+            """Handle HEAD requests."""
+            client_ip = self.client_address[0] if self.client_address else "127.0.0.1"
+            if not check_http_rate_limit(client_ip):
+                self._send_headers(429)
+                return
             if self.path in ("/", "/health", "/healthz"):
-                self.send_response(200)
-                self.send_header("Content-type", "text/plain; charset=utf-8")
-                self.send_header("X-Content-Type-Options", "nosniff")
-                self.send_header("X-Frame-Options", "DENY")
-                self.end_headers()
-                self.wfile.write(b"Bot is healthy!")
+                self._send_headers(200)
             else:
-                self.send_response(404)
-                self.send_header("Content-type", "text/plain; charset=utf-8")
-                self.send_header("X-Content-Type-Options", "nosniff")
-                self.end_headers()
-                self.wfile.write(b"Not Found")
+                self._send_headers(404)
+
+        def do_GET(self):
+            client_ip = self.client_address[0] if self.client_address else "127.0.0.1"
+            if not check_http_rate_limit(client_ip):
+                self._send_headers(429)
+                self.wfile.write(b"429 Too Many Requests - Rate limit exceeded\n")
+                return
+
+            if self.path in ("/", "/health", "/healthz"):
+                self._send_headers(200)
+                self.wfile.write(b"SuperMarket Ops Agent is healthy!\n")
+            else:
+                self._send_headers(404)
+                self.wfile.write(b"404 Not Found\n")
 
         def do_POST(self):
-            self.send_response(405)
-            self.send_header("Content-type", "text/plain; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(b"Method Not Allowed")
+            self._send_headers(405)
+            self.wfile.write(b"405 Method Not Allowed\n")
 
         def do_PUT(self):
             self.do_POST()
@@ -1000,11 +1233,13 @@ def main():
     app.add_handler(CommandHandler("bill", bill_command))
     app.add_handler(CommandHandler("khata", khata_command))
     app.add_handler(CommandHandler("summary", summary_command))
+    app.add_handler(CommandHandler("barcode", barcode_command))
     app.add_handler(CommandHandler("invoice", invoice_command))
     app.add_handler(CommandHandler("analysis", analysis_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CallbackQueryHandler(button_callback_handler))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice_note))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.CONTACT | (filters.TEXT & ~filters.COMMAND), handle_message))
 
     print(f"🤖 Supermarket Ops Agent Telegram Bot is running...")

@@ -95,16 +95,24 @@ def _reset_failed_attempts(identifier: str) -> None:
     _FAILED_LOGIN_ATTEMPTS.pop(identifier, None)
 
 
+from skills.security import sanitize_input, validate_password_strength
+
+
 def register_shop(
     shop_name: str,
     password: str,
     shop_address: Optional[str] = None,
     shop_gstin: Optional[str] = None
 ) -> Dict[str, Any]:
-    """Register a new supermarket shop in the system."""
-    name = shop_name.strip()
-    if not name or not password.strip():
+    """Register a new supermarket shop in the system with validated password strength."""
+    name = sanitize_input(shop_name, max_length=100)
+    clean_pwd = sanitize_input(password, max_length=128)
+    if not name or not clean_pwd:
         return {"status": "error", "message": "Shop name and password are mandatory fields!"}
+
+    pwd_ok, pwd_msg = validate_password_strength(clean_pwd)
+    if not pwd_ok:
+        return {"status": "error", "message": pwd_msg}
 
     conn = get_db_connection()
     try:
@@ -114,7 +122,7 @@ def register_shop(
             cur.close()
             return {"status": "error", "message": f"Shop '{name}' already exists. Please choose Login instead."}
 
-        pwd_hash = _hash_password(password.strip())
+        pwd_hash = _hash_password(clean_pwd)
         with immediate_transaction(conn):
             cur = conn.cursor()
             cur.execute("""
@@ -122,8 +130,8 @@ def register_shop(
                 VALUES (%s, %s, %s, %s)
                 RETURNING shop_id
             """, (name, pwd_hash,
-                  shop_address.strip() if shop_address else None,
-                  shop_gstin.strip() if shop_gstin else None))
+                  sanitize_input(shop_address, max_length=255) if shop_address else None,
+                  sanitize_input(shop_gstin, max_length=20) if shop_gstin else None))
             shop_id = cur.fetchone()["shop_id"]
             cur.close()
 
@@ -139,8 +147,10 @@ def register_shop(
 
 def login_shop(telegram_id: str, shop_name: str, password: str) -> Dict[str, Any]:
     """Authenticate Telegram user to an existing shop using credentials with rate-limit brute-force protection."""
-    name = shop_name.strip()
-    lockout_msg = _check_rate_limit(f"{telegram_id}:{name.lower()}")
+    name = sanitize_input(shop_name, max_length=100)
+    clean_pwd = sanitize_input(password, max_length=128)
+    clean_tid = sanitize_input(telegram_id, max_length=64)
+    lockout_msg = _check_rate_limit(f"{clean_tid}:{name.lower()}")
     if lockout_msg:
         return {"status": "error", "message": lockout_msg}
 

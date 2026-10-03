@@ -17,7 +17,7 @@ def test_daily_summary_and_close_day():
 
     # Cut a UPI bill (Butter 2 pkts)
     b2 = start_bill("Customer 2")["bill_id"]
-    add_item_to_bill(b2, "Butter", 2)
+    add_item_to_bill(b2, "SKU-BUTTER-100", 2)
     finalize_bill(b2, payment_mode="upi")
     b2_total = preview_bill(b2)["summary"]["grand_total"]
 

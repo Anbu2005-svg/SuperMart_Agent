@@ -78,12 +78,12 @@ def _get_pool() -> "psycopg2.pool.ThreadedConnectionPool":
     if _POOL is None:
         with _POOL_LOCK:
             if _POOL is None:
-                if not DATABASE_URL:
-                    raise ValueError("DATABASE_URL is not set in environment variables!")
+                tz = os.getenv("TIMEZONE", "Asia/Kolkata")
                 _POOL = psycopg2.pool.ThreadedConnectionPool(
                     minconn=2,
                     maxconn=15,
                     dsn=DATABASE_URL,
+                    options=f"-c timezone={tz}",
                     cursor_factory=psycopg2.extras.RealDictCursor
                 )
     return _POOL

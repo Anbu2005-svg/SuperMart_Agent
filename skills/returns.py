@@ -97,9 +97,10 @@ def process_return(bill_id: str, sku_or_name: str, qty: float,
 
             # Log audit event
             _log_event(
-                event_type="RETURN_PROCESSED",
-                entity_type="return",
-                entity_id=return_id,
+                conn,
+                "RETURN_PROCESSED",
+                "return",
+                return_id,
                 details={
                     "bill_id": bill_id,
                     "sku_id": bill_item["product_sku"],
@@ -109,8 +110,7 @@ def process_return(bill_id: str, sku_or_name: str, qty: float,
                     "reason": reason
                 },
                 old_value=0,
-                new_value=refund_amount,
-                conn=conn
+                new_value=refund_amount
             )
 
             cur.close()
@@ -157,14 +157,16 @@ def list_returns(bill_id: str = None, days: int = 7) -> Dict[str, Any]:
                 ORDER BY r.created_at DESC
             """, (bill_id.strip(),))
         else:
+            from datetime import date, timedelta
+            cutoff_date = (date.today() - timedelta(days=max(1, int(days)))).isoformat()
             cur.execute("""
                 SELECT r.*, p.name AS product_name, p.unit
                 FROM returns r
                 JOIN products p ON r.sku_id = p.sku_id
-                WHERE r.created_at >= CURRENT_DATE - INTERVAL '%s days'
+                WHERE r.created_at >= %s::date
                 ORDER BY r.created_at DESC
                 LIMIT 50
-            """, (max(1, int(days)),))
+            """, (cutoff_date,))
 
         rows = cur.fetchall()
         cur.close()

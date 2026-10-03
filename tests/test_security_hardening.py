@@ -1,3 +1,6 @@
+# Pure security unit tests — no database connection required
+NO_DB = True
+
 import os
 import math
 import uuid
@@ -237,4 +240,85 @@ def test_update_gst_slab_whitespace_defense():
     res = update_gst_slab(18, sku_or_name="   ", category="   ", hsn_code="   ")
     assert res["status"] == "error"
     assert "Specify at least one target" in res["message"]
+
+
+def test_password_strength_validation():
+    from skills.security import validate_password_strength
+    assert validate_password_strength("")[0] is False
+    assert validate_password_strength("   ")[0] is False
+    assert validate_password_strength("12345")[0] is False  # too short (< 6)
+    assert validate_password_strength("123456")[0] is True   # minimum 6
+    assert validate_password_strength("SecureP@ss2026")[0] is True
+    assert validate_password_strength("a" * 150)[0] is False  # too long (> 128)
+
+
+def test_secret_masking():
+    from skills.security import mask_secret
+    assert mask_secret(None) == "<not set>"
+    assert mask_secret("") == "<not set>"
+    assert mask_secret("short") == "***"
+    masked = mask_secret("1234567890:AAHBdummytokenexamplehere123456789")
+    assert masked.startswith("1234...")
+    assert masked.endswith("...6789")
+    assert "AAHBdummy" not in masked
+
+
+def test_input_sanitization():
+    from skills.security import sanitize_input
+    # Null byte stripping
+    assert sanitize_input("hello\x00world") == "helloworld"
+    # Control character stripping
+    assert sanitize_input("text\x07with\x08bell") == "textwithbell"
+    # Length bounding
+    assert len(sanitize_input("a" * 500, max_length=50)) == 50
+    # None handling
+    assert sanitize_input(None) == ""
+
+
+def test_xml_escaping_for_reportlab():
+    from skills.security import escape_xml_text
+    assert escape_xml_text("M&M Store") == "M&amp;M Store"
+    assert escape_xml_text("<script>alert(1)</script>") == "&lt;script&gt;alert(1)&lt;/script&gt;"
+    assert escape_xml_text('Quote "test"') == "Quote &quot;test&quot;"
+    assert escape_xml_text(None) == ""
+
+
+def test_admin_access_control(monkeypatch):
+    from skills.security import is_admin_user
+    monkeypatch.setenv("ADMIN_TELEGRAM_IDS", "12345678,98765432")
+    assert is_admin_user("12345678") is True
+    assert is_admin_user("98765432") is True
+    assert is_admin_user("11111111") is False
+    assert is_admin_user(None) is False
+
+
+def test_http_security_headers_and_cors():
+    from skills.security import get_security_headers
+    headers = get_security_headers()
+    assert headers["X-Content-Type-Options"] == "nosniff"
+    assert headers["X-Frame-Options"] == "DENY"
+    assert "default-src 'none'" in headers["Content-Security-Policy"]
+    assert headers["X-XSS-Protection"] == "1; mode=block"
+    assert "Access-Control-Allow-Origin" in headers
+    assert "OPTIONS" in headers["Access-Control-Allow-Methods"]
+
+
+def test_http_anti_dos_rate_limiter():
+    from skills.security import check_http_rate_limit, _HTTP_IP_RATE_BUCKETS
+    _HTTP_IP_RATE_BUCKETS.clear()
+    ip = "192.168.1.100"
+    for _ in range(5):
+        assert check_http_rate_limit(ip, max_reqs=5, window_sec=60) is True
+    # 6th request is throttled
+    assert check_http_rate_limit(ip, max_reqs=5, window_sec=60) is False
+    _HTTP_IP_RATE_BUCKETS.clear()
+
+
+def test_environment_validation():
+    from skills.security import validate_environment
+    status = validate_environment()
+    assert "valid" in status
+    assert "issues" in status
+    assert "warnings" in status
+
 

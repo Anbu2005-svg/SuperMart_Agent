@@ -7,6 +7,7 @@ from reportlab.lib.units import inch
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from skills.billing import preview_bill
+from skills.security import escape_xml_text
 
 # ── Indian number-to-words (for "Rupees in words" on the invoice) ──
 _ONES = ["", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten",
@@ -139,8 +140,8 @@ def generate_pdf_invoice(bill_id: str, output_dir: str = "generated_docs") -> st
     shop = _fetch_shop_details()
 
     # ── Header ──
-    story.append(Paragraph(f"<b>{shop['shop_name']}</b>", title_style))
-    story.append(Paragraph(f"{shop['shop_address']} | GSTIN: {shop['shop_gstin']}", subtitle_style))
+    story.append(Paragraph(f"<b>{escape_xml_text(shop['shop_name'])}</b>", title_style))
+    story.append(Paragraph(f"{escape_xml_text(shop['shop_address'])} | GSTIN: {escape_xml_text(shop['shop_gstin'])}", subtitle_style))
     story.append(Spacer(1, 10))
     story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor('#2B6CB0'), spaceAfter=15))
 
@@ -152,24 +153,24 @@ def generate_pdf_invoice(bill_id: str, output_dir: str = "generated_docs") -> st
     info_data = [
         [
             Paragraph("<b>Tax Invoice</b>", ParagraphStyle('H2', fontName='Helvetica-Bold', fontSize=14, textColor=colors.HexColor('#2B6CB0'))),
-            Paragraph(f"<b>{invoice_label}</b>", right_cell_style)
+            Paragraph(f"<b>{escape_xml_text(invoice_label)}</b>", right_cell_style)
         ],
         [
-            Paragraph(f"<b>Bill ID:</b> {bill_data['bill_id']}", cell_style),
+            Paragraph(f"<b>Bill ID:</b> {escape_xml_text(bill_data['bill_id'])}", cell_style),
             Paragraph(f"<b>Status:</b> {final_or_draft}", right_cell_style)
         ],
         [
-            Paragraph(f"<b>Customer Name:</b> {bill_data['customer_name']}", cell_style),
-            Paragraph(f"<b>Payment Mode:</b> {payment_mode_str}", right_cell_style)
+            Paragraph(f"<b>Customer Name:</b> {escape_xml_text(bill_data['customer_name'])}", cell_style),
+            Paragraph(f"<b>Payment Mode:</b> {escape_xml_text(payment_mode_str)}", right_cell_style)
         ],
         [
-            Paragraph(f"<b>Place of Supply:</b> {bill_data.get('place_of_supply') or shop['place_of_supply']}", cell_style),
-            Paragraph(f"<b>Date:</b> {bill_data.get('finalized_at') or bill_data.get('created_at') or 'N/A'}", right_cell_style)
+            Paragraph(f"<b>Place of Supply:</b> {escape_xml_text(bill_data.get('place_of_supply') or shop['place_of_supply'])}", cell_style),
+            Paragraph(f"<b>Date:</b> {escape_xml_text(bill_data.get('finalized_at') or bill_data.get('created_at') or 'N/A')}", right_cell_style)
         ]
     ]
     if bill_data.get('payment_ref'):
         info_data.append([
-            Paragraph(f"<b>Payment Ref:</b> {bill_data['payment_ref']}", cell_style),
+            Paragraph(f"<b>Payment Ref:</b> {escape_xml_text(bill_data['payment_ref'])}", cell_style),
             Paragraph("", right_cell_style)
         ])
 
@@ -199,9 +200,9 @@ def generate_pdf_invoice(bill_id: str, output_dir: str = "generated_docs") -> st
     for idx, item in enumerate(bill_data['items'], 1):
         table_rows.append([
             Paragraph(str(idx), cell_style),
-            Paragraph(item['name'], cell_style),
-            Paragraph(item.get('hsn_code') or "-", cell_style),
-            Paragraph(f"{item['qty']} {item['unit']}", cell_style),
+            Paragraph(escape_xml_text(item['name']), cell_style),
+            Paragraph(escape_xml_text(item.get('hsn_code') or "-"), cell_style),
+            Paragraph(f"{item['qty']} {escape_xml_text(item['unit'])}", cell_style),
             Paragraph(f"{item['unit_price']:.2f}", right_cell_style),
             Paragraph(f"{item.get('line_subtotal', item['qty'] * item['unit_price']):.2f}", right_cell_style),
             Paragraph(f"{item['gst_slab']}%", right_cell_style),

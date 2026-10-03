@@ -5,7 +5,7 @@ import logging
 from typing import Dict, Any, List, Callable
 from openai import OpenAI
 
-from skills import inventory, billing, credit, analytics, documents, preferences, audit, notifications, gst_export, returns
+from skills import inventory, billing, credit, analytics, documents, preferences, audit, notifications, gst_export, returns, barcode
 
 logger = logging.getLogger(__name__)
 
@@ -199,7 +199,9 @@ TOOL_DISPATCH: Dict[str, Callable] = {
     "export_gstr1": gst_export.export_gstr1,
     "process_return": returns.process_return,
     "list_returns": returns.list_returns,
-    "generate_digital_receipt": billing.generate_digital_receipt
+    "generate_digital_receipt": billing.generate_digital_receipt,
+    "lookup_product_by_barcode": barcode.lookup_product_by_barcode,
+    "assign_barcode_to_product": barcode.assign_barcode_to_product
 }
 
 # OpenAI-compatible tool schemas
@@ -843,6 +845,35 @@ TOOLS_SCHEMA = [
                     "bill_id": {"type": "string", "description": "Bill ID (e.g. 'BILL-7C9A41E2')"}
                 },
                 "required": ["bill_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "lookup_product_by_barcode",
+            "description": "Look up a supermarket product by its barcode string (EAN-13, UPC, Code 128, QR Code). Returns product name, price, stock, and nearest expiry date.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "barcode": {"type": "string", "description": "The scanned or typed barcode string (e.g. '8901030383458')"}
+                },
+                "required": ["barcode"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "assign_barcode_to_product",
+            "description": "Map or link a barcode number to an existing product SKU in the inventory.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sku_id": {"type": "string", "description": "The existing product SKU ID (e.g. 'SKU-SALT-01')"},
+                    "barcode": {"type": "string", "description": "The barcode string to link (e.g. '8901030383458')"}
+                },
+                "required": ["sku_id", "barcode"]
             }
         }
     }
