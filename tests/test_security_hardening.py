@@ -322,3 +322,47 @@ def test_environment_validation():
     assert "warnings" in status
 
 
+def test_safe_workspace_path_validation():
+    from skills.security import validate_safe_workspace_path
+    
+    # Valid relative filenames resolve into generated_docs or data
+    ok, path, err = validate_safe_workspace_path("test_catalog.csv", default_dir="generated_docs")
+    assert ok is True
+    assert "generated_docs" in path
+    assert err is None
+
+    # Path traversal attempts are blocked
+    ok_trav, _, err_trav = validate_safe_workspace_path("../../etc/passwd")
+    assert ok_trav is False
+    assert "Path traversal" in err_trav
+
+    # Access to sensitive files is blocked
+    ok_env, _, err_env = validate_safe_workspace_path(".env")
+    assert ok_env is False
+
+    # Paths outside allowed dirs are blocked
+    ok_out, _, err_out = validate_safe_workspace_path("C:/Windows/System32/cmd.exe")
+    assert ok_out is False
+
+
+def test_password_strength_hardening():
+    from skills.security import validate_password_strength
+    assert validate_password_strength("")[0] is False
+    assert validate_password_strength("12345")[0] is False
+    assert validate_password_strength("123456")[0] is True
+    assert validate_password_strength("SuperMarket@2026_SecureKey")[0] is True
+    assert validate_password_strength("a" * 130)[0] is False  # max length exceeded
+
+
+def test_rbac_action_authorization():
+    from skills.roles import is_action_allowed
+    # Staff cannot perform owner-only operations
+    allowed, reason = is_action_allowed("999999", "daily_profit_dashboard")
+    # If unconfigured and no roles, defaults to owner, but if user is staff:
+    from skills.roles import OWNER_ONLY_ACTIONS
+    assert "daily_profit_dashboard" in OWNER_ONLY_ACTIONS
+    assert "update_gst_slab" in OWNER_ONLY_ACTIONS
+    assert "set_user_role" in OWNER_ONLY_ACTIONS
+
+
+

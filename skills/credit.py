@@ -5,9 +5,17 @@ from skills.audit import _log_event
 
 
 def _get_customer_by_name(conn, name: str) -> Optional[Any]:
+    if not name or not isinstance(name, str):
+        return None
+    clean = name.strip()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM customers WHERE name ILIKE %s", (f"%{name.strip()}%",))
+    # 1. Exact match first
+    cur.execute("SELECT * FROM customers WHERE LOWER(name) = LOWER(%s)", (clean,))
     row = cur.fetchone()
+    if not row:
+        escaped = clean.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        cur.execute("SELECT * FROM customers WHERE name ILIKE %s ORDER BY LENGTH(name) ASC LIMIT 1", (f"%{escaped}%",))
+        row = cur.fetchone()
     cur.close()
     return row
 
@@ -21,11 +29,15 @@ def charge_khata(customer_name: str, amount: float, bill_id: Optional[str] = Non
     try:
         with immediate_transaction(conn):
             cur = conn.cursor()
-            # Lock the customer row so balance + limit checks are race-free
-            cur.execute("""
-                SELECT * FROM customers WHERE name ILIKE %s FOR UPDATE
-            """, (f"%{customer_name.strip()}%",))
+            clean_cust = customer_name.strip()
+            # Lock the customer row: exact match first, then sanitized prefix
+            cur.execute("SELECT * FROM customers WHERE LOWER(name) = LOWER(%s) FOR UPDATE", (clean_cust,))
             customer = cur.fetchone()
+            if not customer:
+                escaped = clean_cust.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                cur.execute("SELECT * FROM customers WHERE name ILIKE %s FOR UPDATE ORDER BY LENGTH(name) ASC LIMIT 1", (f"%{escaped}%",))
+                customer = cur.fetchone()
+
             if not customer:
                 return {
                     "status": "error",
@@ -92,8 +104,14 @@ def record_payment(customer_name: str, amount: float) -> Dict[str, Any]:
     try:
         with immediate_transaction(conn):
             cur = conn.cursor()
-            cur.execute("SELECT * FROM customers WHERE name ILIKE %s FOR UPDATE", (f"%{customer_name.strip()}%",))
+            clean_cust = customer_name.strip()
+            cur.execute("SELECT * FROM customers WHERE LOWER(name) = LOWER(%s) FOR UPDATE", (clean_cust,))
             customer = cur.fetchone()
+            if not customer:
+                escaped = clean_cust.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                cur.execute("SELECT * FROM customers WHERE name ILIKE %s FOR UPDATE ORDER BY LENGTH(name) ASC LIMIT 1", (f"%{escaped}%",))
+                customer = cur.fetchone()
+
             if not customer:
                 return {
                     "status": "error",

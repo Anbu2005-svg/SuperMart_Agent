@@ -60,10 +60,16 @@ def export_catalog_csv(file_path: Optional[str] = None) -> Dict[str, Any]:
         saved_path = None
 
         if file_path:
-            os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
-            with open(file_path, "w", encoding="utf-8") as f:
+            from skills.security import validate_safe_workspace_path
+            ok, target_path, err_msg = validate_safe_workspace_path(
+                file_path, default_dir="generated_docs", allowed_dirs=["generated_docs", "data"]
+            )
+            if not ok:
+                return {"status": "error", "message": f"Unauthorized export destination: {err_msg}"}
+
+            with open(target_path, "w", encoding="utf-8") as f:
                 f.write(csv_text)
-            saved_path = os.path.abspath(file_path)
+            saved_path = target_path
 
         return {
             "status": "success",
@@ -87,9 +93,15 @@ def import_catalog_csv(
     """
     raw_text = csv_content
     if not raw_text and file_path:
-        if not os.path.exists(file_path):
+        from skills.security import validate_safe_workspace_path
+        ok, target_path, err_msg = validate_safe_workspace_path(
+            file_path, default_dir="data", allowed_dirs=["data", "generated_docs"], allow_create_dir=False
+        )
+        if not ok:
+            return {"status": "error", "message": f"Unauthorized file import path: {err_msg}"}
+        if not os.path.exists(target_path):
             return {"status": "error", "message": f"File '{file_path}' does not exist."}
-        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+        with open(target_path, "r", encoding="utf-8", errors="replace") as f:
             raw_text = f.read()
 
     if not raw_text or not raw_text.strip():

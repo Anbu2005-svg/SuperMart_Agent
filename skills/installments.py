@@ -118,9 +118,15 @@ def record_installment_payment(
             if plan["status"] == "completed":
                 return {"status": "error", "message": f"Plan '{plan_id}' is already fully paid and completed."}
 
-            new_amount_paid = round(float(plan["amount_paid"]) + amt, 2)
-            new_installments_paid = int(plan["installments_paid"]) + 1
             total_amount = float(plan["total_amount"])
+            already_paid = float(plan["amount_paid"])
+            current_due = max(0.0, round(total_amount - already_paid, 2))
+
+            # Cap payment to remaining balance to prevent fraudulent overpayment injections
+            actual_payment = min(amt, current_due) if current_due > 0 else amt
+
+            new_amount_paid = round(already_paid + actual_payment, 2)
+            new_installments_paid = int(plan["installments_paid"]) + 1
             remaining = max(0.0, round(total_amount - new_amount_paid, 2))
 
             if remaining <= 0:
@@ -139,11 +145,18 @@ def record_installment_payment(
                 WHERE plan_id = %s
             """, (new_amount_paid, new_installments_paid, new_status, next_due, plan_id.strip()))
 
+            # Synchronize customer's main khata ledger balance so debt is relieved
+            cur.execute("""
+                UPDATE customers
+                SET khata_balance = GREATEST(0.0, khata_balance - %s), updated_at = CURRENT_TIMESTAMP
+                WHERE customer_id = %s
+            """, (actual_payment, plan["customer_id"]))
+
             # Also record in khata transactions for audit trail
             cur.execute("""
                 INSERT INTO khata_transactions (customer_id, type, amount)
                 VALUES (%s, 'payment', %s)
-            """, (plan["customer_id"], amt))
+            """, (plan["customer_id"], actual_payment))
             cur.close()
 
         status_msg = "🎉 Fully paid off!" if new_status == "completed" else f"Next due: {next_due.strftime('%d %B %Y')} (Remaining: ₹{remaining:,.2f})"
@@ -151,11 +164,11 @@ def record_installment_payment(
             "status": "success",
             "plan_id": plan_id,
             "customer_name": plan["customer_name"],
-            "amount_paid_now": amt,
+            "amount_paid_now": actual_payment,
             "total_paid": new_amount_paid,
             "remaining_balance": remaining,
             "plan_status": new_status,
-            "message": f"✅ Payment of ₹{amt:,.2f} recorded for {plan['customer_name']} on plan {plan_id}! {status_msg}"
+            "message": f"✅ Payment of ₹{actual_payment:,.2f} recorded for {plan['customer_name']} on plan {plan_id}! {status_msg}"
         }
     finally:
         conn.close()

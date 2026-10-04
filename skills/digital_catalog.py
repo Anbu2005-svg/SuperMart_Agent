@@ -271,13 +271,19 @@ def export_html_catalog(
 </html>
 """
 
-    os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
-    with open(file_path, "w", encoding="utf-8") as f:
+    from skills.security import validate_safe_workspace_path
+    ok, target_path, err_msg = validate_safe_workspace_path(
+        file_path, default_dir="data", allowed_dirs=["data", "generated_docs"]
+    )
+    if not ok:
+        return {"status": "error", "message": f"Unauthorized HTML catalog export path: {err_msg}"}
+
+    with open(target_path, "w", encoding="utf-8") as f:
         f.write(html_content)
 
     return {
         "status": "success",
-        "file_path": os.path.abspath(file_path),
+        "file_path": target_path,
         "total_items": catalog_res["total_items"],
-        "message": f"Digital HTML catalog created at '{file_path}'."
+        "message": f"Digital HTML catalog created at '{target_path}'."
     }

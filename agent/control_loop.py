@@ -243,11 +243,30 @@ def run_agent_turn(
             except Exception:
                 func_args = {}
 
-            # Inject owner_id where applicable
+            # Inject owner_id and bind caller identity where applicable to prevent spoofing
             if func_name in ["set_preference", "get_preference"]:
                 func_args["owner_id"] = str(owner_id)
+            if func_name in ["set_user_role", "list_user_roles"]:
+                func_args["requester_telegram_id"] = str(owner_id)
 
             logger.info(f"Executing Tool Call: {func_name} with args: {func_args}")
+
+            # 🛡️ RBAC Authorization Guard: Check if requester role allows this tool execution
+            from skills.roles import is_action_allowed
+            action_allowed, denial_reason = is_action_allowed(str(owner_id), func_name)
+            if not action_allowed:
+                logger.warning(f"Access Denied: User '{owner_id}' attempted unauthorized action '{func_name}'")
+                result_content = json.dumps({
+                    "status": "forbidden",
+                    "error_type": "AccessDenied",
+                    "message": denial_reason
+                })
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": result_content
+                })
+                continue
 
             if func_name in TOOL_DISPATCH:
                 try:

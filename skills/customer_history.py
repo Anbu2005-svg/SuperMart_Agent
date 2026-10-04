@@ -14,6 +14,20 @@ from typing import Dict, Any, List, Optional
 from db.models import get_db_connection
 
 
+def _lookup_customer(cur, customer_name: str) -> Optional[Any]:
+    """Look up customer preferring exact match, then prefix/substring with wildcards escaped."""
+    if not customer_name:
+        return None
+    clean = customer_name.strip()
+    cur.execute("SELECT * FROM customers WHERE LOWER(name) = LOWER(%s)", (clean,))
+    row = cur.fetchone()
+    if not row:
+        escaped = clean.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        cur.execute("SELECT * FROM customers WHERE name ILIKE %s ORDER BY LENGTH(name) ASC LIMIT 1", (f"%{escaped}%",))
+        row = cur.fetchone()
+    return row
+
+
 def get_customer_purchase_history(customer_name: str, limit_bills: int = 10) -> Dict[str, Any]:
     """
     Retrieve comprehensive purchase history, metrics, and top bought products for a customer.
@@ -24,8 +38,7 @@ def get_customer_purchase_history(customer_name: str, limit_bills: int = 10) -> 
     conn = get_db_connection()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT * FROM customers WHERE name ILIKE %s", (f"%{customer_name.strip()}%",))
-        customer = cur.fetchone()
+        customer = _lookup_customer(cur, customer_name)
         if not customer:
             return {"status": "error", "message": f"Customer '{customer_name}' not found in database."}
 
@@ -148,8 +161,7 @@ def get_customer_smart_suggestions(customer_name: str) -> Dict[str, Any]:
     conn = get_db_connection()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT * FROM customers WHERE name ILIKE %s", (f"%{customer_name.strip()}%",))
-        customer = cur.fetchone()
+        customer = _lookup_customer(cur, customer_name)
         if not customer:
             return {"status": "error", "message": f"Customer '{customer_name}' not found in database."}
 

@@ -359,26 +359,21 @@ def list_all_products(category: Optional[str] = None, limit: int = 100, offset: 
     conn = get_db_connection()
     try:
         cur = conn.cursor()
-        if include_inactive:
-            base_where = ""
-            params = []
-        else:
-            base_where = "WHERE is_active = TRUE "
-            params = []
-
+        where_parts = []
+        params = []
+        if not include_inactive:
+            where_parts.append("is_active = TRUE")
         if category:
-            base_where += ("WHERE " if not base_where.strip() else "AND ") + "category ILIKE %s "
+            where_parts.append("category ILIKE %s")
             params.append(f"%{category.strip()}%")
 
-        cur.execute(f"SELECT * FROM products {base_where}ORDER BY category ASC, name ASC LIMIT %s OFFSET %s",
-                    (*params, limit, offset))
+        where_clause = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
+        query_sql = "SELECT * FROM products" + where_clause + " ORDER BY category ASC, name ASC LIMIT %s OFFSET %s"
+        cur.execute(query_sql, (*params, limit, offset))
         products = cur.fetchall()
 
-        # Strip trailing WHERE/AND for count query
-        count_clause = base_where.strip()
-        if count_clause.startswith("AND"):
-            count_clause = "WHERE " + count_clause[3:].strip()
-        cur.execute(f"SELECT COUNT(*) AS count FROM products {count_clause}".rstrip(), params)
+        count_sql = "SELECT COUNT(*) AS count FROM products" + where_clause
+        cur.execute(count_sql, tuple(params))
         total_count = cur.fetchone()["count"]
         cur.close()
 
@@ -581,9 +576,11 @@ def update_gst_slab(
                 query_conditions.append("hsn_code = %s")
                 params.append(hsn_clean)
 
-            where_clause = " AND ".join(query_conditions)
+            sql = "SELECT sku_id, name, gst_slab FROM products WHERE is_active = TRUE"
+            if query_conditions:
+                sql += " AND " + " AND ".join(query_conditions)
 
-            cur.execute(f"SELECT sku_id, name, gst_slab FROM products WHERE is_active = TRUE AND {where_clause}", tuple(params))
+            cur.execute(sql, tuple(params))
             products = cur.fetchall()
 
             if not products:

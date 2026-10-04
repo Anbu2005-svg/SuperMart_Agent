@@ -129,7 +129,7 @@ def escape_xml_text(value: Any) -> str:
 
 def validate_password_strength(password: str) -> Tuple[bool, str]:
     """Validate password strength for shop accounts:
-    - Minimum 6 characters
+    - Minimum 6 characters (maximum 128)
     - Must not be purely whitespace
     """
     if not password or not isinstance(password, str):
@@ -140,6 +140,75 @@ def validate_password_strength(password: str) -> Tuple[bool, str]:
     if len(pwd) > 128:
         return False, "Password cannot exceed 128 characters!"
     return True, "Password is valid."
+
+
+def validate_safe_workspace_path(
+    file_path: Optional[str],
+    default_dir: str = "generated_docs",
+    allowed_dirs: Optional[List[str]] = None,
+    allow_create_dir: bool = True
+) -> Tuple[bool, str, Optional[str]]:
+    """
+    Validate that file_path is strictly confined to allowed workspace directories.
+    Prevents path traversal (e.g. '../', absolute paths pointing outside project).
+    Returns (is_valid, resolved_absolute_path, error_message).
+    """
+    if not file_path or not isinstance(file_path, str) or not file_path.strip():
+        return False, "", "File path cannot be empty."
+
+    raw_path = file_path.strip()
+    if "\x00" in raw_path or ".." in raw_path:
+        return False, "", "Path traversal attempts ('..') or null bytes are strictly forbidden."
+
+    if allowed_dirs is None:
+        allowed_dirs = ["generated_docs", "data"]
+
+    cwd = os.path.realpath(os.getcwd())
+    norm = os.path.normpath(raw_path)
+
+    # Disallow absolute drives or root paths outside the workspace
+    if os.path.isabs(norm):
+        target_abs = os.path.realpath(norm)
+    else:
+        parts = norm.split(os.sep)
+        if parts[0] not in allowed_dirs:
+            norm = os.path.join(default_dir, norm)
+        target_abs = os.path.realpath(os.path.join(cwd, norm))
+
+    # Verify containment in allowed directories or system temp (handling cross-drive comparisons on Windows)
+    import tempfile
+    is_safe = False
+    try:
+        target_drive = os.path.splitdrive(target_abs)[0].lower()
+        sys_temp = os.path.realpath(tempfile.gettempdir())
+        if os.path.splitdrive(sys_temp)[0].lower() == target_drive:
+            if os.path.commonpath([sys_temp, target_abs]) == sys_temp:
+                is_safe = True
+
+        if not is_safe:
+            for ad in allowed_dirs:
+                safe_base = os.path.realpath(os.path.join(cwd, ad))
+                safe_drive = os.path.splitdrive(safe_base)[0].lower()
+                if target_drive != safe_drive:
+                    continue
+                if os.path.commonpath([safe_base, target_abs]) == safe_base:
+                    is_safe = True
+                    break
+    except (ValueError, Exception):
+        is_safe = False
+
+    if not is_safe:
+        return False, "", f"File path must reside strictly within allowed directories: {allowed_dirs}"
+
+    # Disallow sensitive or system files
+    basename = os.path.basename(target_abs)
+    if basename.startswith(".") or basename in (".env", ".env.example", "bot.py"):
+        return False, "", "Access to hidden or protected system files is forbidden."
+
+    if allow_create_dir:
+        os.makedirs(os.path.dirname(target_abs), exist_ok=True)
+
+    return True, target_abs, None
 
 
 def get_security_headers() -> Dict[str, str]:
