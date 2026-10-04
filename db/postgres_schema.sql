@@ -160,7 +160,7 @@ BEGIN
     END IF;
 END $$;
 
--- bills: sequential invoice number + place of supply snapshot
+-- bills: sequential invoice number + place of supply snapshot + void tracking
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='bills' AND column_name='invoice_number') THEN
@@ -168,6 +168,12 @@ BEGIN
     END IF;
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='bills' AND column_name='place_of_supply') THEN
         ALTER TABLE bills ADD COLUMN place_of_supply VARCHAR(100);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='bills' AND column_name='voided_at') THEN
+        ALTER TABLE bills ADD COLUMN voided_at TIMESTAMP WITH TIME ZONE NULL;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='bills' AND column_name='void_reason') THEN
+        ALTER TABLE bills ADD COLUMN void_reason TEXT NULL;
     END IF;
 END $$;
 
@@ -385,5 +391,92 @@ CREATE TABLE IF NOT EXISTS price_history (
 );
 
 CREATE INDEX IF NOT EXISTS idx_price_history_sku ON price_history(sku_id);
+
+-- ══════════════════════════════════════════════════════════════════
+-- PHASE 1 & 2 EXTENSIONS: CASH DRAWER, GST ITC, SCHEDULED NOTIFICATIONS
+-- ══════════════════════════════════════════════════════════════════
+
+-- Feature #6: Cash Drawer & Petty Cash Management
+CREATE TABLE IF NOT EXISTS cash_drawer_sessions (
+    session_id SERIAL PRIMARY KEY,
+    opened_by VARCHAR(255) NOT NULL,
+    opened_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    opening_cash DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    closed_by VARCHAR(255) NULL,
+    closed_at TIMESTAMP WITH TIME ZONE NULL,
+    closing_cash_counted DOUBLE PRECISION NULL,
+    expected_cash DOUBLE PRECISION NULL,
+    variance DOUBLE PRECISION NULL,
+    status VARCHAR(50) NOT NULL DEFAULT 'open', -- 'open', 'closed'
+    notes TEXT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_cash_drawer_status ON cash_drawer_sessions(status);
+CREATE INDEX IF NOT EXISTS idx_cash_drawer_opened_at ON cash_drawer_sessions(opened_at);
+
+CREATE TABLE IF NOT EXISTS petty_cash_expenses (
+    id SERIAL PRIMARY KEY,
+    session_id INTEGER NULL REFERENCES cash_drawer_sessions(session_id) ON DELETE SET NULL,
+    expense_type VARCHAR(50) NOT NULL DEFAULT 'expense', -- 'expense', 'cash_in', 'cash_drop'
+    category VARCHAR(100) NOT NULL, -- 'tea_snacks', 'cleaning', 'stationery', 'courier', 'misc', 'owner_withdrawal'
+    amount DOUBLE PRECISION NOT NULL,
+    paid_to VARCHAR(255) NULL,
+    recorded_by VARCHAR(255) NOT NULL,
+    notes TEXT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_petty_cash_session ON petty_cash_expenses(session_id);
+CREATE INDEX IF NOT EXISTS idx_petty_cash_created ON petty_cash_expenses(created_at);
+
+-- Feature #14: Supplier Bills GST Tax Breakdown (ITC)
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='supplier_bills' AND column_name='taxable_amount') THEN
+        ALTER TABLE supplier_bills ADD COLUMN taxable_amount DOUBLE PRECISION DEFAULT 0;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='supplier_bills' AND column_name='cgst') THEN
+        ALTER TABLE supplier_bills ADD COLUMN cgst DOUBLE PRECISION DEFAULT 0;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='supplier_bills' AND column_name='sgst') THEN
+        ALTER TABLE supplier_bills ADD COLUMN sgst DOUBLE PRECISION DEFAULT 0;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='supplier_bills' AND column_name='igst') THEN
+        ALTER TABLE supplier_bills ADD COLUMN igst DOUBLE PRECISION DEFAULT 0;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='supplier_bills' AND column_name='gst_amount') THEN
+        ALTER TABLE supplier_bills ADD COLUMN gst_amount DOUBLE PRECISION DEFAULT 0;
+    END IF;
+END $$;
+
+-- Feature #4 & #13: Scheduled Alerts & Low Stock Notification Records
+CREATE TABLE IF NOT EXISTS scheduled_alerts (
+    alert_id SERIAL PRIMARY KEY,
+    alert_type VARCHAR(50) NOT NULL, -- 'low_stock', 'eod_summary', 'pending_payables', 'khata_overdue'
+    recipient_id VARCHAR(255) NOT NULL,
+    channel VARCHAR(50) NOT NULL DEFAULT 'telegram',
+    schedule_time VARCHAR(20) NOT NULL DEFAULT '09:00',
+    is_active BOOLEAN DEFAULT TRUE,
+    last_sent_at TIMESTAMP WITH TIME ZONE NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS low_stock_notifications (
+    id SERIAL PRIMARY KEY,
+    sku_id VARCHAR(255) NOT NULL REFERENCES products(sku_id) ON DELETE CASCADE,
+    product_name VARCHAR(255) NOT NULL,
+    current_stock DOUBLE PRECISION NOT NULL,
+    reorder_level DOUBLE PRECISION NOT NULL,
+    supplier_name VARCHAR(255) NULL,
+    supplier_phone VARCHAR(50) NULL,
+    notified_to VARCHAR(255) NOT NULL,
+    channel VARCHAR(50) DEFAULT 'telegram',
+    message_text TEXT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_low_stock_notif_sku ON low_stock_notifications(sku_id);
+CREATE INDEX IF NOT EXISTS idx_low_stock_notif_created ON low_stock_notifications(created_at);
+
 
 

@@ -9,7 +9,10 @@ from skills import (
     inventory, billing, credit, analytics, documents, preferences, audit,
     notifications, gst_export, returns, barcode, upi, expiry, whatsapp, voice,
     customer_history, shop_manager, purchase_orders, feedback, roles, installments, eod_report,
-    supplier_ledger, price_tracker, catalog_bulk, abc_analysis, cross_sell, digital_catalog, stock_reconcile
+    supplier_ledger, price_tracker, catalog_bulk, abc_analysis, cross_sell, digital_catalog, stock_reconcile,
+    cash_drawer, gst_itc, reorder_alerts,
+    scheduled_alerts, invoice_ocr, i18n,
+    seasonal_demand, demand_anomaly, dashboard
 )
 
 logger = logging.getLogger(__name__)
@@ -179,6 +182,9 @@ TOOL_DISPATCH: Dict[str, Callable] = {
     "edit_item_qty": billing.edit_item_qty,
     "preview_bill": billing.preview_bill,
     "finalize_bill": billing.finalize_bill,
+    "void_bill": billing.void_bill,
+    "search_bills": billing.search_bills,
+    "get_bill_details": billing.get_bill_details,
     "charge_khata": credit.charge_khata,
     "record_payment": credit.record_payment,
     "get_khata_balance": credit.get_khata_balance,
@@ -257,7 +263,32 @@ TOOL_DISPATCH: Dict[str, Callable] = {
     "generate_digital_catalog": digital_catalog.generate_digital_catalog,
     "export_html_catalog": digital_catalog.export_html_catalog,
     "audit_physical_stock": stock_reconcile.audit_physical_stock,
-    "apply_stock_reconciliation": stock_reconcile.apply_stock_reconciliation
+    "apply_stock_reconciliation": stock_reconcile.apply_stock_reconciliation,
+    # ── Phase 2: Cash & Tax Operations ──
+    "open_cash_drawer": cash_drawer.open_cash_drawer,
+    "record_petty_cash": cash_drawer.record_petty_cash,
+    "get_cash_drawer_status": cash_drawer.get_cash_drawer_status,
+    "close_cash_drawer": cash_drawer.close_cash_drawer,
+    "list_drawer_sessions": cash_drawer.list_drawer_sessions,
+    "get_gst_itc_summary": gst_itc.get_gst_itc_summary,
+    "check_low_stock_reorder_alerts": reorder_alerts.check_low_stock_reorder_alerts,
+    "list_recent_reorder_notifications": reorder_alerts.list_recent_reorder_notifications,
+    # ── Phase 3: Automation & Visuals ──
+    "create_scheduled_alert": scheduled_alerts.create_scheduled_alert,
+    "list_scheduled_alerts": scheduled_alerts.list_scheduled_alerts,
+    "toggle_scheduled_alert": scheduled_alerts.toggle_scheduled_alert,
+    "trigger_due_scheduled_alerts": scheduled_alerts.trigger_due_scheduled_alerts,
+    "parse_invoice_image": invoice_ocr.parse_invoice_image,
+    "intake_invoice_stock": invoice_ocr.intake_invoice_stock,
+    "set_bot_language": i18n.set_bot_language,
+    "get_bot_language": i18n.get_bot_language,
+    "list_supported_languages": i18n.list_supported_languages,
+    # ── Phase 4: Advanced Analytics & Web Dashboard ──
+    "get_seasonal_demand_insights": seasonal_demand.get_seasonal_demand_insights,
+    "get_upcoming_festival_projections": seasonal_demand.get_upcoming_festival_projections,
+    "detect_sales_anomalies": demand_anomaly.detect_sales_anomalies,
+    "get_dashboard_summary": dashboard.get_dashboard_summary,
+    "export_dashboard_html": dashboard.export_dashboard_html
 }
 
 # OpenAI-compatible tool schemas
@@ -1495,6 +1526,509 @@ TOOLS_SCHEMA = [
                     "reason": {"type": "string", "description": "Audit reason note"}
                 },
                 "required": ["reconciled_items"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "void_bill",
+            "description": "Cancel or void a draft or finalized bill. Restores inventory stock quantities, restores batches, reverses Khata balance if billed on credit, and logs audit trail.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "bill_id": {"type": "string", "description": "The Bill ID to void (e.g. 'BILL-A1B2C3D4')"},
+                    "reason": {"type": "string", "description": "Reason for cancellation/void"}
+                },
+                "required": ["bill_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_bills",
+            "description": "Search and filter past bills by bill ID, customer name/phone, payment mode, status, or date range.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search text matching bill_id, customer name, or phone"},
+                    "customer_name": {"type": "string", "description": "Filter specifically by customer name"},
+                    "payment_mode": {"type": "string", "description": "Payment mode: 'cash', 'upi', 'card', or 'khata'"},
+                    "status": {"type": "string", "description": "Bill status: 'draft', 'finalized', or 'voided'"},
+                    "date_from": {"type": "string", "description": "Start date in YYYY-MM-DD format"},
+                    "date_to": {"type": "string", "description": "End date in YYYY-MM-DD format"},
+                    "limit": {"type": "integer", "description": "Max bills to return (default 20)"},
+                    "offset": {"type": "integer", "description": "Pagination offset"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_bill_details",
+            "description": "Retrieve comprehensive details for a specific bill, including item breakdown, GST slab breakup, and audit event history.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "bill_id": {"type": "string", "description": "The Bill ID to view (e.g. 'BILL-A1B2C3D4')"}
+                },
+                "required": ["bill_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_active_shop",
+            "description": "Get current active supermarket shop profile and GSTIN.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_branch_shop",
+            "description": "Create a new branch shop with separate credentials and inventory.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "shop_name": {"type": "string", "description": "Unique name of the branch"},
+                    "password": {"type": "string", "description": "Admin password for the branch"},
+                    "shop_address": {"type": "string", "description": "Physical address of branch"},
+                    "shop_gstin": {"type": "string", "description": "GSTIN of branch"}
+                },
+                "required": ["shop_name", "password"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_purchase_orders",
+            "description": "List existing purchase orders with supplier and item details.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "supplier_name": {"type": "string", "description": "Filter by supplier name"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_feedback_request_link",
+            "description": "Generate a WhatsApp link asking customer for rating and feedback.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "customer_name": {"type": "string", "description": "Customer name"},
+                    "phone_number": {"type": "string", "description": "Customer phone number"}
+                },
+                "required": ["customer_name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_user_role",
+            "description": "Get effective role ('owner' or 'staff') of a user.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "telegram_id": {"type": "string", "description": "Telegram user ID"}
+                },
+                "required": ["telegram_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_user_role",
+            "description": "Assign role ('owner' or 'staff') to a Telegram user. Requires owner authority.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target_telegram_id": {"type": "string", "description": "Telegram user ID to assign role to"},
+                    "new_role": {"type": "string", "description": "Role to assign ('owner' or 'staff')"}
+                },
+                "required": ["target_telegram_id", "new_role"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_user_roles",
+            "description": "List all configured user roles.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "record_installment_payment",
+            "description": "Record an installment EMI payment from a customer.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "plan_id": {"type": "integer", "description": "Installment Plan ID"},
+                    "amount": {"type": "number", "description": "Amount paid"}
+                },
+                "required": ["plan_id", "amount"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_active_installments",
+            "description": "List active customer installment / EMI plans.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "customer_name": {"type": "string", "description": "Filter by customer name"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_installment_reminder_link",
+            "description": "Generate a WhatsApp payment reminder link for an upcoming or overdue installment.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "plan_id": {"type": "integer", "description": "Installment Plan ID"}
+                },
+                "required": ["plan_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_cash_drawer",
+            "description": "Open a new cash drawer shift session with an initial cash float balance.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "opening_cash": {"type": "number", "description": "Starting cash float amount in drawer (e.g. 2000.0)"},
+                    "opened_by": {"type": "string", "description": "Name or identifier of cashier opening drawer"},
+                    "notes": {"type": "string", "description": "Optional opening notes"}
+                },
+                "required": ["opening_cash"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "record_petty_cash",
+            "description": "Record petty cash expenses, cash additions, or owner withdrawals from the cash drawer.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "amount": {"type": "number", "description": "Amount in rupees"},
+                    "category": {"type": "string", "description": "Category: 'tea_snacks', 'cleaning', 'stationery', 'courier', 'misc', 'owner_withdrawal'"},
+                    "expense_type": {"type": "string", "description": "Type: 'expense' (cash out), 'cash_in' (cash in), or 'cash_drop' (bank drop)"},
+                    "paid_to": {"type": "string", "description": "Recipient or vendor name"},
+                    "recorded_by": {"type": "string", "description": "Staff member recording the transaction"},
+                    "notes": {"type": "string", "description": "Additional remarks"}
+                },
+                "required": ["amount", "category"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_cash_drawer_status",
+            "description": "Get real-time balance reconciliation of the active cash drawer shift (float + cash sales - expenses = expected cash).",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "close_cash_drawer",
+            "description": "Close active cash drawer shift, compare physical counted cash with expected cash, and calculate variance.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "closing_cash_counted": {"type": "number", "description": "Actual physical cash counted in drawer"},
+                    "closed_by": {"type": "string", "description": "Name of cashier closing shift"},
+                    "notes": {"type": "string", "description": "Optional closing notes"}
+                },
+                "required": ["closing_cash_counted"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_drawer_sessions",
+            "description": "View historical cash drawer shifts and variance reports.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "Number of sessions to return (default 10)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_gst_itc_summary",
+            "description": "Calculate GST Input Tax Credit (ITC) from purchases vs Output GST from sales, computing Net Tax Liability and GSTR-3B summary.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "date_from": {"type": "string", "description": "Start date YYYY-MM-DD"},
+                    "date_to": {"type": "string", "description": "End date YYYY-MM-DD"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_low_stock_reorder_alerts",
+            "description": "Scan inventory for low stock items and generate notifications with supplier contact details to reorder manually (NO automated reorders).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "notify_recipient": {"type": "string", "description": "Name/role of recipient (default Store Owner)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_recent_reorder_notifications",
+            "description": "List audit history of low stock reorder alert notifications previously dispatched.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "Number of notifications to return"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_scheduled_alert",
+            "description": "Configure an automated scheduled notification for low stock, expiry, EOD summary, or pending payables.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "alert_type": {"type": "string", "description": "Alert type: 'low_stock', 'expiry_warning', 'eod_summary', or 'pending_payables'"},
+                    "recipient_id": {"type": "string", "description": "Telegram user ID or chat ID"},
+                    "channel": {"type": "string", "description": "Channel: 'telegram' or 'whatsapp'"},
+                    "schedule_time": {"type": "string", "description": "Time in 24-hr format (e.g. '09:00', '21:30')"}
+                },
+                "required": ["alert_type", "recipient_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_scheduled_alerts",
+            "description": "List all configured recurring scheduled alert rules.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "toggle_scheduled_alert",
+            "description": "Activate or pause an existing scheduled alert rule.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "alert_id": {"type": "integer", "description": "Alert ID"},
+                    "is_active": {"type": "boolean", "description": "True to activate, False to pause"}
+                },
+                "required": ["alert_id", "is_active"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "trigger_due_scheduled_alerts",
+            "description": "Evaluate and trigger scheduled notification payloads immediately.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "alert_type": {"type": "string", "description": "Optional filter for specific alert type"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "parse_invoice_image",
+            "description": "Extract tabular line items, vendor details, and prices from a photo of a vendor paper invoice / challan.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "image_bytes_or_path": {"type": "string", "description": "File path to invoice photo or receipt image"},
+                    "raw_text_hint": {"type": "string", "description": "Optional raw invoice text transcript"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "intake_invoice_stock",
+            "description": "Receive products from a parsed vendor invoice into inventory and optionally record in Accounts Payable ledger.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "invoice_number": {"type": "string", "description": "Vendor invoice number"},
+                    "vendor_name": {"type": "string", "description": "Name of supplier/distributor"},
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "matched_sku_id": {"type": "string"},
+                                "intake_qty": {"type": "number"},
+                                "cost_price": {"type": "number"}
+                            },
+                            "required": ["matched_sku_id", "intake_qty"]
+                        },
+                        "description": "List of items with matched_sku_id, intake_qty, and cost_price"
+                    },
+                    "record_payable_bill": {"type": "boolean", "description": "Whether to create a record in supplier payables"}
+                },
+                "required": ["invoice_number", "vendor_name", "items"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_bot_language",
+            "description": "Change bot interface language to English ('en'), Tamil ('ta'), or Hindi ('hi').",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "owner_id": {"type": "string", "description": "User Telegram ID or username"},
+                    "lang_code": {"type": "string", "description": "'en' for English, 'ta' for Tamil, 'hi' for Hindi"}
+                },
+                "required": ["owner_id", "lang_code"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_bot_language",
+            "description": "Get current preferred language code for user.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "owner_id": {"type": "string", "description": "User Telegram ID"}
+                },
+                "required": ["owner_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_supported_languages",
+            "description": "List all supported bot localization languages.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_seasonal_demand_insights",
+            "description": "Analyze festival and seasonal demand trends (Diwali, Pongal, Summer, Monsoon) with category lift and stock recommendations.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "festival_or_season": {"type": "string", "description": "Season name: 'diwali', 'pongal', 'summer', 'monsoon', or 'year_end'"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_upcoming_festival_projections",
+            "description": "View full annual Indian festival retail calendar and historical demand lifts.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "detect_sales_anomalies",
+            "description": "Detect statistical sales anomalies (Z-score demand surges, velocity dropouts, imminent stockout risks).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days": {"type": "integer", "description": "Analysis window in days (default 14)"},
+                    "z_threshold": {"type": "number", "description": "Z-score anomaly threshold (default 2.0)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_dashboard_summary",
+            "description": "Get live executive dashboard operations summary (today's revenue, bills, cash drawer, alerts, GST).",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "export_dashboard_html",
+            "description": "Generate an interactive, responsive HTML5 visual executive operations dashboard file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "output_file": {"type": "string", "description": "Optional custom output HTML path"}
+                }
             }
         }
     }

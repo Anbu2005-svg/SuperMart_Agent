@@ -602,6 +602,7 @@ def finalize_bill(
         low_stock_alerts = _fetch_low_stock_alerts()
 
         final_preview = preview_bill(bill_id)
+        final_preview["total"] = grand_total
         final_preview["message"] = f"Bill {bill_id} finalized successfully! Invoice #{next_invoice_number}. Total: ₹{grand_total} ({payment_mode.upper()})."
 
         # Auto-generate dynamic UPI QR code when payment mode is UPI
@@ -802,4 +803,394 @@ def generate_digital_receipt(bill_id: str) -> Dict[str, Any]:
         }
     finally:
         conn.close()
+
+
+def search_bills(
+    query: Optional[str] = None,
+    customer_name: Optional[str] = None,
+    payment_mode: Optional[str] = None,
+    status: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    limit: int = 20,
+    offset: int = 0
+) -> Dict[str, Any]:
+    """
+    Search and filter bills by bill ID, customer name/phone, payment mode, status, or date range.
+    Returns matched bills with summaries, line item counts, and aggregate totals.
+    """
+    limit = max(1, min(limit, 100))
+    offset = max(0, offset)
+
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        conditions = ["1=1"]
+        params: List[Any] = []
+
+        if query and query.strip():
+            q = f"%{query.strip()}%"
+            conditions.append("""(
+                b.bill_id ILIKE %s OR 
+                c.name ILIKE %s OR 
+                c.phone ILIKE %s OR
+                CAST(b.invoice_number AS TEXT) ILIKE %s
+            )""")
+            params.extend([q, q, q, q])
+
+        if customer_name and customer_name.strip():
+            conditions.append("c.name ILIKE %s")
+            params.append(f"%{customer_name.strip()}%")
+
+        if payment_mode and payment_mode.strip():
+            conditions.append("b.payment_mode = %s")
+            params.append(payment_mode.strip().lower())
+
+        if status and status.strip():
+            conditions.append("b.status = %s")
+            params.append(status.strip().lower())
+
+        if date_from and date_from.strip():
+            conditions.append("DATE(COALESCE(b.finalized_at, b.created_at)) >= %s::date")
+            params.append(date_from.strip())
+
+        if date_to and date_to.strip():
+            conditions.append("DATE(COALESCE(b.finalized_at, b.created_at)) <= %s::date")
+            params.append(date_to.strip())
+
+        where_clause = " AND ".join(conditions)
+
+        # Count & aggregates
+        agg_sql = f"""
+            SELECT 
+                COUNT(*) AS total_count,
+                COALESCE(SUM(CASE WHEN b.status != 'voided' THEN b.total ELSE 0 END), 0) AS total_sales_volume,
+                COALESCE(SUM(CASE WHEN b.status = 'voided' THEN 1 ELSE 0 END), 0) AS voided_count
+            FROM bills b
+            LEFT JOIN customers c ON b.customer_id = c.customer_id
+            WHERE {where_clause}
+        """
+        cur.execute(agg_sql, params)
+        agg = cur.fetchone()
+        total_count = agg["total_count"] if agg else 0
+        total_sales_volume = float(agg["total_sales_volume"]) if agg else 0.0
+        voided_count = agg["voided_count"] if agg else 0
+
+        # Query results
+        query_sql = f"""
+            SELECT 
+                b.bill_id,
+                b.invoice_number,
+                b.status,
+                b.payment_mode,
+                b.payment_ref,
+                b.subtotal,
+                b.cgst,
+                b.sgst,
+                b.total,
+                b.created_at,
+                b.finalized_at,
+                b.voided_at,
+                b.void_reason,
+                c.customer_id,
+                c.name AS customer_name,
+                c.phone AS customer_phone,
+                COUNT(bi.id) AS item_count
+            FROM bills b
+            LEFT JOIN customers c ON b.customer_id = c.customer_id
+            LEFT JOIN bill_items bi ON b.bill_id = bi.bill_id
+            WHERE {where_clause}
+            GROUP BY b.bill_id, b.invoice_number, b.status, b.payment_mode, b.payment_ref,
+                     b.subtotal, b.cgst, b.sgst, b.total, b.created_at, b.finalized_at,
+                     b.voided_at, b.void_reason, c.customer_id, c.name, c.phone
+            ORDER BY COALESCE(b.finalized_at, b.created_at) DESC
+            LIMIT %s OFFSET %s
+        """
+        cur.execute(query_sql, params + [limit, offset])
+        rows = cur.fetchall()
+        cur.close()
+
+        bills = []
+        for r in rows:
+            bills.append({
+                "bill_id": r["bill_id"],
+                "invoice_number": r["invoice_number"],
+                "status": r["status"],
+                "customer_name": r["customer_name"] or "Walk-in Customer",
+                "customer_phone": r["customer_phone"],
+                "payment_mode": r["payment_mode"] or "unspecified",
+                "payment_ref": r["payment_ref"],
+                "subtotal": round(float(r["subtotal"] or 0), 2),
+                "cgst": round(float(r["cgst"] or 0), 2),
+                "sgst": round(float(r["sgst"] or 0), 2),
+                "total": round(float(r["total"] or 0), 2),
+                "item_count": int(r["item_count"] or 0),
+                "created_at": str(r["created_at"]) if r["created_at"] else None,
+                "finalized_at": str(r["finalized_at"]) if r["finalized_at"] else None,
+                "voided_at": str(r["voided_at"]) if r.get("voided_at") else None,
+                "void_reason": r.get("void_reason")
+            })
+
+        return {
+            "status": "success",
+            "total_count": total_count,
+            "matched_bills_count": len(bills),
+            "limit": limit,
+            "offset": offset,
+            "total_sales_volume": round(total_sales_volume, 2),
+            "voided_count": voided_count,
+            "bills": bills
+        }
+    finally:
+        conn.close()
+
+
+def get_bill_details(bill_id: str) -> Dict[str, Any]:
+    """
+    Retrieve full details for a specific bill, including itemized lines, GST slab breakdown,
+    customer details, and audit history.
+    """
+    if not bill_id or not bill_id.strip():
+        return {"status": "error", "message": "Bill ID is required."}
+
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT b.*, c.name AS customer_name, c.phone AS customer_phone, c.khata_balance
+            FROM bills b
+            LEFT JOIN customers c ON b.customer_id = c.customer_id
+            WHERE b.bill_id = %s
+        """, (bill_id.strip(),))
+        bill = cur.fetchone()
+        if not bill:
+            cur.close()
+            return {"status": "error", "message": f"Bill '{bill_id}' not found."}
+
+        cur.execute("""
+            SELECT bi.*, p.name AS product_name, p.category, p.unit
+            FROM bill_items bi
+            JOIN products p ON bi.sku_id = p.sku_id
+            WHERE bi.bill_id = %s
+            ORDER BY bi.id ASC
+        """, (bill_id.strip(),))
+        items_rows = cur.fetchall()
+
+        # Audit events for this bill
+        cur.execute("""
+            SELECT event_type, details, created_at
+            FROM audit_log
+            WHERE entity_id = %s OR details LIKE %s
+            ORDER BY created_at ASC
+        """, (bill_id.strip(), f"%{bill_id.strip()}%"))
+        audit_rows = cur.fetchall()
+        cur.close()
+
+        items = []
+        slab_breakup: Dict[str, Dict[str, float]] = {}
+        for r in items_rows:
+            slab_key = f"{r['gst_slab']:.1f}%"
+            if slab_key not in slab_breakup:
+                slab_breakup[slab_key] = {"taxable": 0.0, "cgst": 0.0, "sgst": 0.0, "total_tax": 0.0}
+
+            subtotal_line = round(r["qty"] * r["unit_price"], 2)
+            gst_calc = _calculate_gst(subtotal_line, r["gst_slab"])
+
+            slab_breakup[slab_key]["taxable"] += subtotal_line
+            slab_breakup[slab_key]["cgst"] += gst_calc["cgst"]
+            slab_breakup[slab_key]["sgst"] += gst_calc["sgst"]
+            slab_breakup[slab_key]["total_tax"] += gst_calc["total_tax"]
+
+            items.append({
+                "sku_id": r["sku_id"],
+                "product_name": r["product_name"],
+                "category": r["category"],
+                "unit": r["unit"],
+                "qty": r["qty"],
+                "unit_price": r["unit_price"],
+                "gst_slab": r["gst_slab"],
+                "line_total": r["line_total"]
+            })
+
+        history = []
+        for a in audit_rows:
+            history.append({
+                "event_type": a["event_type"],
+                "details": a["details"],
+                "timestamp": str(a["created_at"])
+            })
+
+        return {
+            "status": "success",
+            "bill_id": bill["bill_id"],
+            "invoice_number": bill.get("invoice_number"),
+            "status_code": bill["status"],
+            "customer": {
+                "name": bill["customer_name"] or "Walk-in Customer",
+                "phone": bill["customer_phone"],
+                "current_khata_balance": float(bill["khata_balance"] or 0) if bill["khata_balance"] is not None else None
+            },
+            "financials": {
+                "subtotal": round(float(bill["subtotal"] or 0), 2),
+                "cgst": round(float(bill["cgst"] or 0), 2),
+                "sgst": round(float(bill["sgst"] or 0), 2),
+                "total": round(float(bill["total"] or 0), 2),
+                "payment_mode": bill.get("payment_mode") or "unspecified",
+                "payment_ref": bill.get("payment_ref")
+            },
+            "timestamps": {
+                "created_at": str(bill["created_at"]) if bill.get("created_at") else None,
+                "finalized_at": str(bill["finalized_at"]) if bill.get("finalized_at") else None,
+                "voided_at": str(bill["voided_at"]) if bill.get("voided_at") else None,
+                "void_reason": bill.get("void_reason")
+            },
+            "items": items,
+            "gst_slab_breakup": slab_breakup,
+            "timeline": history
+        }
+    finally:
+        conn.close()
+
+
+def void_bill(bill_id: str, reason: str = "Customer requested cancellation") -> Dict[str, Any]:
+    """
+    Cancel/void a bill safely with full stock and Khata reversal.
+    - If bill is in 'draft' status: marks it voided immediately.
+    - If bill is 'finalized': restores product stock quantities, restores batches,
+      reverses customer Khata balance (if billed on credit), marks status 'voided',
+      and records full audit trail.
+    - If bill is already 'voided': returns error.
+    """
+    if not bill_id or not bill_id.strip():
+        return {"status": "error", "message": "Bill ID is required."}
+
+    conn = get_db_connection()
+    try:
+        with immediate_transaction(conn):
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM bills WHERE bill_id = %s FOR UPDATE", (bill_id.strip(),))
+            bill = cur.fetchone()
+            if not bill:
+                return {"status": "error", "message": f"Bill '{bill_id}' not found."}
+
+            if bill["status"] == "voided":
+                return {
+                    "status": "error",
+                    "message": f"Bill '{bill_id}' has already been voided on {bill.get('voided_at') or 'earlier'}."
+                }
+
+            items_restored = []
+            khata_reversal_amount = 0.0
+
+            if bill["status"] == "finalized":
+                # 1. Fetch all items in this bill
+                cur.execute("""
+                    SELECT bi.*, p.name, p.quantity AS current_stock
+                    FROM bill_items bi
+                    JOIN products p ON bi.sku_id = p.sku_id
+                    WHERE bi.bill_id = %s
+                """, (bill_id.strip(),))
+                items = cur.fetchall()
+
+                # 2. Restore stock for each item
+                for item in items:
+                    cur.execute("""
+                        SELECT quantity FROM products WHERE sku_id = %s FOR UPDATE
+                    """, (item["sku_id"],))
+                    prod = cur.fetchone()
+                    current_qty = prod["quantity"] if prod else item["current_stock"]
+                    new_qty = round(current_qty + item["qty"], 3)
+
+                    cur.execute("""
+                        UPDATE products
+                        SET quantity = quantity + %s, updated_at = CURRENT_TIMESTAMP
+                        WHERE sku_id = %s
+                    """, (item["qty"], item["sku_id"]))
+
+                    # Restore stock batches if any batch exists
+                    try:
+                        cur.execute("""
+                            SELECT batch_id FROM stock_batches
+                            WHERE sku_id = %s
+                            ORDER BY expiry_date NULLS LAST, received_at DESC
+                            LIMIT 1 FOR UPDATE
+                        """, (item["sku_id"],))
+                        batch = cur.fetchone()
+                        if batch:
+                            cur.execute("""
+                                UPDATE stock_batches
+                                SET qty_remaining = qty_remaining + %s
+                                WHERE batch_id = %s
+                            """, (item["qty"], batch["batch_id"]))
+                    except Exception:
+                        pass
+
+                    _log_event(conn, "BILL_VOID_STOCK_RESTORED", "product", item["sku_id"],
+                               details={"bill_id": bill_id.strip(), "restored_qty": item["qty"], "reason": reason},
+                               old_value=current_qty, new_value=new_qty)
+
+                    items_restored.append({
+                        "sku_id": item["sku_id"],
+                        "name": item["name"],
+                        "restored_qty": item["qty"],
+                        "new_stock": new_qty
+                    })
+
+                # 3. Khata reversal if payment was on credit
+                if bill.get("payment_mode") == "khata" and bill.get("customer_id"):
+                    cur.execute("SELECT * FROM customers WHERE customer_id = %s FOR UPDATE", (bill["customer_id"],))
+                    cust = cur.fetchone()
+                    if cust:
+                        old_bal = float(cust["khata_balance"] or 0.0)
+                        khata_reversal_amount = float(bill["total"] or 0.0)
+                        new_bal = round(max(0.0, old_bal - khata_reversal_amount), 2)
+
+                        cur.execute("""
+                            UPDATE customers
+                            SET khata_balance = %s, updated_at = CURRENT_TIMESTAMP
+                            WHERE customer_id = %s
+                        """, (new_bal, bill["customer_id"]))
+
+                        cur.execute("""
+                            INSERT INTO khata_transactions (customer_id, type, amount, bill_id)
+                            VALUES (%s, 'void_reversal', %s, %s)
+                        """, (bill["customer_id"], khata_reversal_amount, bill_id.strip()))
+
+                        _log_event(conn, "KHATA_CREDITED_VOID", "customer", cust["name"],
+                                   details={"bill_id": bill_id.strip(), "amount_reversed": khata_reversal_amount, "reason": reason},
+                                   old_value=old_bal, new_value=new_bal)
+
+            # 4. Mark bill as voided
+            cur.execute("""
+                UPDATE bills
+                SET status = 'voided',
+                    voided_at = CURRENT_TIMESTAMP,
+                    void_reason = %s
+                WHERE bill_id = %s
+            """, (reason, bill_id.strip()))
+
+            _log_event(conn, "BILL_VOIDED", "bill", bill_id.strip(),
+                       details={"reason": reason, "previous_status": bill["status"], "items_restored_count": len(items_restored)})
+
+            cur.close()
+
+        msg = f"Bill {bill_id} voided successfully. Reason: {reason}."
+        if items_restored:
+            msg += f" {len(items_restored)} item(s) restored to inventory."
+        if khata_reversal_amount > 0:
+            msg += f" Khata balance reversed by ₹{khata_reversal_amount:.2f}."
+
+        return {
+            "status": "success",
+            "message": msg,
+            "bill_id": bill_id.strip(),
+            "previous_status": bill["status"],
+            "new_status": "voided",
+            "items_restored": items_restored,
+            "khata_reversal_amount": khata_reversal_amount,
+            "void_reason": reason
+        }
+    finally:
+        conn.close()
+
 

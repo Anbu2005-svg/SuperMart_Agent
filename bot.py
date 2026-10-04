@@ -162,6 +162,31 @@ def get_barcode_action_keyboard(barcode: str, sku_id: str):
     ]
     return InlineKeyboardMarkup(keyboard)
 
+def get_bill_action_keyboard(bill_id: str, is_draft: bool = False) -> InlineKeyboardMarkup:
+    """Returns interactive quick action buttons for bills (finalize payment, receipt, PDF invoice, void)."""
+    if is_draft:
+        keyboard = [
+            [
+                InlineKeyboardButton("💵 Finalize Cash", callback_data=f"b_pay:{bill_id}:cash"),
+                InlineKeyboardButton("📱 Finalize UPI", callback_data=f"b_pay:{bill_id}:upi")
+            ],
+            [
+                InlineKeyboardButton("💳 Finalize Khata", callback_data=f"b_pay:{bill_id}:khata"),
+                InlineKeyboardButton("❌ Void Bill", callback_data=f"b_void:{bill_id}")
+            ]
+        ]
+    else:
+        keyboard = [
+            [
+                InlineKeyboardButton("📄 PDF Invoice", callback_data=f"b_pdf:{bill_id}"),
+                InlineKeyboardButton("🧾 Receipt", callback_data=f"b_rcpt:{bill_id}")
+            ],
+            [
+                InlineKeyboardButton("❌ Void Bill", callback_data=f"b_void:{bill_id}")
+            ]
+        ]
+    return InlineKeyboardMarkup(keyboard)
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command — starts fresh conversation context for user."""
     telegram_id = str(update.effective_user.id) if update.effective_user else "default"
@@ -850,18 +875,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE, use
         finally:
             typing_task.cancel()
 
+        # Check if reply discusses a bill to attach interactive inline quick-action buttons
+        import re
+        bill_match = re.search(r"BILL-[A-F0-9]{8}", reply_text, re.IGNORECASE)
+        reply_markup = None
+        if bill_match:
+            detected_bid = bill_match.group(0).upper()
+            is_draft = "draft" in reply_text.lower() or "created" in reply_text.lower() or "added" in reply_text.lower()
+            reply_markup = get_bill_action_keyboard(detected_bid, is_draft=is_draft)
+
         # ✅ Edit the "thinking" placeholder with the actual response
         try:
-            await thinking_msg.edit_text(reply_text, parse_mode="Markdown")
+            await thinking_msg.edit_text(reply_text, parse_mode="Markdown", reply_markup=reply_markup)
         except Exception:
             try:
-                await thinking_msg.edit_text(reply_text)
+                await thinking_msg.edit_text(reply_text, reply_markup=reply_markup)
             except Exception:
                 # If edit fails (e.g. message too old), send as new message
                 try:
-                    await update.message.reply_text(reply_text, parse_mode="Markdown")
+                    await update.message.reply_text(reply_text, parse_mode="Markdown", reply_markup=reply_markup)
                 except Exception:
-                    await update.message.reply_text(reply_text)
+                    await update.message.reply_text(reply_text, reply_markup=reply_markup)
 
         # Send generated document files safely (confined strictly to generated_docs/)
         for file_path in generated_files:
@@ -1003,6 +1037,54 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             await query.edit_message_text(res["message"], parse_mode="Markdown")
         else:
             await query.edit_message_text(f"❌ {res.get('message', 'Failed to apply clearance discount')}")
+    elif query.data.startswith("b_pay:"):
+        parts = query.data.split(":", 2)
+        bid = parts[1]
+        pmode = parts[2]
+        from skills.billing import finalize_bill
+        res = finalize_bill(bill_id=bid, payment_mode=pmode)
+        if res.get("status") == "success":
+            receipt_txt = res.get("receipt") or res.get("message")
+            await query.edit_message_text(
+                f"✅ **Bill `{bid}` Finalized Successfully!**\n\n"
+                f"💳 **Payment Mode:** {pmode.upper()}\n\n"
+                f"```\n{receipt_txt}\n```",
+                parse_mode="Markdown",
+                reply_markup=get_bill_action_keyboard(bid, is_draft=False)
+            )
+        else:
+            await query.edit_message_text(f"⚠️ Could not finalize bill `{bid}`: {res.get('message')}")
+    elif query.data.startswith("b_void:"):
+        bid = query.data.split(":", 1)[1]
+        from skills.billing import void_bill
+        res = void_bill(bill_id=bid, reason="Voided via Telegram Quick Action")
+        if res.get("status") == "success":
+            await query.edit_message_text(f"🚫 **Bill `{bid}` Cancelled / Voided.**\n\n{res['message']}", parse_mode="Markdown")
+        else:
+            await query.edit_message_text(f"⚠️ Could not void bill `{bid}`: {res.get('message')}")
+    elif query.data.startswith("b_pdf:"):
+        bid = query.data.split(":", 1)[1]
+        from skills.documents import generate_invoice_pdf
+        res = generate_invoice_pdf(bid)
+        if res.get("status") == "success" and is_safe_generated_file(res.get("file_path")):
+            with open(res["file_path"], "rb") as f:
+                await context.bot.send_document(
+                    chat_id=query.message.chat_id,
+                    document=f,
+                    filename=os.path.basename(res["file_path"]),
+                    caption=f"📄 **GST Tax Invoice for Bill `{bid}`**",
+                    parse_mode="Markdown"
+                )
+        else:
+            await query.message.reply_text(f"⚠️ Could not generate PDF invoice: {res.get('message')}")
+    elif query.data.startswith("b_rcpt:"):
+        bid = query.data.split(":", 1)[1]
+        from skills.billing import preview_bill
+        res = preview_bill(bid)
+        if res.get("status") == "success":
+            await query.message.reply_text(res.get("receipt") or res.get("message"), parse_mode="Markdown")
+        else:
+            await query.message.reply_text(f"⚠️ {res.get('message')}")
 
 async def stock_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /stock command."""
